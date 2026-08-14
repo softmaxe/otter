@@ -1,0 +1,8 @@
+/target/
+.DS_Store
+*.log
+*.mp4
+*.mkv
+*.webm
+*.mov
+*.avi
