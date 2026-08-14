@@ -113,12 +113,14 @@ fn transcode(
     toolchain: &Toolchain,
     input: &Path,
     output: PathBuf,
+    container: Container,
     rate_control_mode: RateControlMode,
 ) -> PathBuf {
     let media = probe_media(&toolchain.ffprobe, input).expect("input should be probed");
     let draft = DraftConfig {
         input: Some(input.to_owned()),
         output: Some(output.clone()),
+        container,
         resolution: Resolution::P480,
         rate_control_mode,
         quality: QualityPreset::Balanced,
@@ -155,7 +157,7 @@ fn wait_for_finished(event_rx: &Receiver<WorkerEvent>) -> PathBuf {
 }
 
 #[test]
-fn probes_audio_and_silent_inputs_and_transcodes_both_rate_modes() {
+fn probes_inputs_and_transcodes_mp4_rate_modes_and_mov_output() {
     let Some(toolchain) = available_toolchain() else {
         return;
     };
@@ -177,12 +179,35 @@ fn probes_audio_and_silent_inputs_and_transcodes_both_rate_modes() {
         probe_media(&toolchain.ffprobe, &without_audio).expect("silent media should be probed");
     assert!(silent_media.audio.is_none());
 
-    for (name, mode) in [
-        ("quality output.mp4", RateControlMode::Quality),
-        ("bitrate output.mp4", RateControlMode::Bitrate),
+    for (name, container, mode) in [
+        (
+            "quality output.mp4",
+            Container::Mp4,
+            RateControlMode::Quality,
+        ),
+        (
+            "bitrate output.mp4",
+            Container::Mp4,
+            RateControlMode::Bitrate,
+        ),
+        (
+            "quality output.mov",
+            Container::Mov,
+            RateControlMode::Quality,
+        ),
     ] {
-        let output = transcode(&toolchain, &with_audio, directory.path().join(name), mode);
+        let output = transcode(
+            &toolchain,
+            &with_audio,
+            directory.path().join(name),
+            container,
+            mode,
+        );
         assert!(output.exists());
+        assert_eq!(
+            output.extension().and_then(OsStr::to_str),
+            Some(container.extension())
+        );
         let result = probe_media(&toolchain.ffprobe, &output).expect("output should be probed");
         assert_eq!(result.video.codec, "h264");
         assert_eq!((result.video.width, result.video.height), (320, 180));

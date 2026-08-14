@@ -7,7 +7,7 @@ FFmpeg TUI lets you choose an input and output with native file dialogs, select 
 ## Features
 
 - Native macOS Open and Save dialogs
-- MP4, Matroska (MKV), and WebM output
+- MP4, MOV, Matroska (MKV), and WebM output
 - H.264, H.265, AV1, and VP9 video options where compatible
 - AAC, Opus, MP3, or disabled audio where compatible
 - Source, 2160p, 1440p, 1080p, 720p, and 480p resolution presets
@@ -116,6 +116,7 @@ The interface prevents container and codec combinations that are known to be inc
 | Container | Video codecs | Audio codecs |
 | --- | --- | --- |
 | MP4 | H.264, H.265, AV1 | AAC, None |
+| MOV | H.264, H.265, AV1 | AAC, None |
 | Matroska (MKV) | H.264, H.265, AV1, VP9 | AAC, Opus, MP3, None |
 | WebM | AV1, VP9 | Opus, None |
 

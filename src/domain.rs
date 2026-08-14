@@ -8,16 +8,18 @@ pub const AUDIO_BITRATE_PRESETS: &[u32] = &[64, 96, 128, 160, 192, 256, 320];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Container {
     Mp4,
+    Mov,
     Matroska,
     WebM,
 }
 
 impl Container {
-    pub const ALL: [Self; 3] = [Self::Mp4, Self::Matroska, Self::WebM];
+    pub const ALL: [Self; 4] = [Self::Mp4, Self::Mov, Self::Matroska, Self::WebM];
 
     pub const fn extension(self) -> &'static str {
         match self {
             Self::Mp4 => "mp4",
+            Self::Mov => "mov",
             Self::Matroska => "mkv",
             Self::WebM => "webm",
         }
@@ -26,6 +28,7 @@ impl Container {
     pub const fn muxer(self) -> &'static str {
         match self {
             Self::Mp4 => "mp4",
+            Self::Mov => "mov",
             Self::Matroska => "matroska",
             Self::WebM => "webm",
         }
@@ -36,6 +39,7 @@ impl fmt::Display for Container {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Mp4 => "MP4",
+            Self::Mov => "MOV",
             Self::Matroska => "Matroska (MKV)",
             Self::WebM => "WebM",
         })
@@ -351,7 +355,7 @@ pub enum ValidationError {
 
 pub const fn supported_video_codecs(container: Container) -> &'static [VideoCodec] {
     match container {
-        Container::Mp4 => &[VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1],
+        Container::Mp4 | Container::Mov => &[VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1],
         Container::Matroska => &VideoCodec::ALL,
         Container::WebM => &[VideoCodec::Av1, VideoCodec::Vp9],
     }
@@ -359,7 +363,7 @@ pub const fn supported_video_codecs(container: Container) -> &'static [VideoCode
 
 pub const fn supported_audio_codecs(container: Container) -> &'static [AudioCodec] {
     match container {
-        Container::Mp4 => &[AudioCodec::Aac, AudioCodec::None],
+        Container::Mp4 | Container::Mov => &[AudioCodec::Aac, AudioCodec::None],
         Container::Matroska => &AudioCodec::ALL,
         Container::WebM => &[AudioCodec::Opus, AudioCodec::None],
     }
@@ -367,14 +371,14 @@ pub const fn supported_audio_codecs(container: Container) -> &'static [AudioCode
 
 pub const fn default_video_codec(container: Container) -> VideoCodec {
     match container {
-        Container::Mp4 | Container::Matroska => VideoCodec::H264,
+        Container::Mp4 | Container::Mov | Container::Matroska => VideoCodec::H264,
         Container::WebM => VideoCodec::Vp9,
     }
 }
 
 pub const fn default_audio_codec(container: Container) -> AudioCodec {
     match container {
-        Container::Mp4 | Container::Matroska => AudioCodec::Aac,
+        Container::Mp4 | Container::Mov | Container::Matroska => AudioCodec::Aac,
         Container::WebM => AudioCodec::Opus,
     }
 }
@@ -435,6 +439,49 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_incompatible_mov_settings() {
+        let mut draft = DraftConfig {
+            container: Container::Mov,
+            video_codec: VideoCodec::Vp9,
+            audio_codec: AudioCodec::Opus,
+            output: Some(PathBuf::from("movie.webm")),
+            ..DraftConfig::default()
+        };
+
+        draft.normalize_for_container();
+
+        assert_eq!(draft.video_codec, VideoCodec::H264);
+        assert_eq!(draft.audio_codec, AudioCodec::Aac);
+        assert_eq!(draft.output, Some(PathBuf::from("movie.mov")));
+    }
+
+    #[test]
+    fn mov_uses_mp4_codec_policy() {
+        assert_eq!(
+            Container::ALL,
+            [
+                Container::Mp4,
+                Container::Mov,
+                Container::Matroska,
+                Container::WebM,
+            ]
+        );
+        assert_eq!(Container::Mov.extension(), "mov");
+        assert_eq!(Container::Mov.muxer(), "mov");
+        assert_eq!(Container::Mov.to_string(), "MOV");
+        assert_eq!(
+            supported_video_codecs(Container::Mov),
+            supported_video_codecs(Container::Mp4)
+        );
+        assert_eq!(
+            supported_audio_codecs(Container::Mov),
+            supported_audio_codecs(Container::Mp4)
+        );
+        assert_eq!(default_video_codec(Container::Mov), VideoCodec::H264);
+        assert_eq!(default_audio_codec(Container::Mov), AudioCodec::Aac);
+    }
+
+    #[test]
     fn quality_values_are_codec_specific() {
         assert_eq!(quality_crf(VideoCodec::H264, QualityPreset::Balanced), 23);
         assert_eq!(quality_crf(VideoCodec::Av1, QualityPreset::Balanced), 35);
@@ -451,10 +498,14 @@ mod tests {
 
     #[test]
     fn suggests_container_extension() {
-        let output = suggested_output_path(
+        let mkv_output = suggested_output_path(
             std::path::Path::new("/tmp/My Clip.mov"),
             Container::Matroska,
         );
-        assert_eq!(output, PathBuf::from("/tmp/My Clip.transcoded.mkv"));
+        assert_eq!(mkv_output, PathBuf::from("/tmp/My Clip.transcoded.mkv"));
+
+        let mov_output =
+            suggested_output_path(std::path::Path::new("/tmp/My Clip.mp4"), Container::Mov);
+        assert_eq!(mov_output, PathBuf::from("/tmp/My Clip.transcoded.mov"));
     }
 }

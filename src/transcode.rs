@@ -126,7 +126,7 @@ pub fn build_command_spec(
     append_video_encoder_args(&mut args, config.video_codec);
     append_rate_control_args(&mut args, config.video_codec, config.video_rate_control);
 
-    if config.container == Container::Mp4 {
+    if matches!(config.container, Container::Mp4 | Container::Mov) {
         if config.video_codec == VideoCodec::H265 {
             args.extend(os_args(["-tag:v", "hvc1"]));
         }
@@ -485,6 +485,51 @@ mod tests {
                 .any(|pair| pair == ["-b:v", "5000k"])
         );
         assert!(!bitrate_args.iter().any(|value| value == "-crf"));
+    }
+
+    #[test]
+    fn mov_family_containers_use_compatible_flags() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("source.mp4");
+        fs::write(&input, b"test").unwrap();
+
+        for (container, extension, muxer) in [
+            (Container::Mp4, "mp4", "mp4"),
+            (Container::Mov, "mov", "mov"),
+        ] {
+            let output = directory.path().join(format!("result.{extension}"));
+            let artifact = OutputArtifact::reserve(output.clone()).unwrap();
+            let mut transcode_config = config(
+                input.clone(),
+                output,
+                VideoRateControl::Quality(QualityPreset::Balanced),
+            );
+            transcode_config.container = container;
+            transcode_config.video_codec = VideoCodec::H265;
+
+            let spec = build_command_spec(
+                Path::new("/usr/bin/ffmpeg"),
+                &transcode_config,
+                &media(input.clone()),
+                &artifact,
+            );
+            let args = spec
+                .args
+                .iter()
+                .map(|value| value.to_string_lossy())
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                spec.temporary_output.extension().and_then(OsStr::to_str),
+                Some(extension)
+            );
+            assert!(args.windows(2).any(|pair| pair == ["-f", muxer]));
+            assert!(args.windows(2).any(|pair| pair == ["-tag:v", "hvc1"]));
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair == ["-movflags", "+faststart"])
+            );
+        }
     }
 
     #[test]
