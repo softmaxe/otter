@@ -192,3 +192,9 @@ cargo build --release
 ```
 
 The integration tests generate temporary synthetic media with FFmpeg. They skip when FFmpeg, FFprobe, `libx264`, or AAC is unavailable and do not access user media files.
+
+## File dialogs
+
+The Open and Save panels run in a short-lived helper process, re-executing this binary with a hidden `--file-dialog` argument. AppKit is never initialised inside the long-running TUI process.
+
+This is deliberate. An in-process panel leaves an invisible window behind at `CGShieldingWindowLevel`: its fade-out animation only completes while the process keeps pumping the AppKit run loop, which a TUI stops doing as soon as it returns to its own event loop. macOS then shows the spinning wait cursor over that region for the rest of the session. Ending the helper process removes the window with it.

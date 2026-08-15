@@ -43,26 +43,6 @@ impl TerminalSession {
         &mut self.terminal
     }
 
-    pub fn suspend_for_dialog(&mut self) -> Result<(), TerminalError> {
-        if self.active {
-            self.terminal.show_cursor()?;
-            execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show)?;
-            disable_raw_mode()?;
-            self.active = false;
-        }
-        Ok(())
-    }
-
-    pub fn resume_after_dialog(&mut self) -> Result<(), TerminalError> {
-        if !self.active {
-            enable_raw_mode()?;
-            execute!(self.terminal.backend_mut(), EnterAlternateScreen, Hide)?;
-            self.terminal.clear()?;
-            self.active = true;
-        }
-        Ok(())
-    }
-
     pub fn restore(&mut self) {
         if self.active {
             let _ = self.terminal.show_cursor();

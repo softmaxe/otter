@@ -11,7 +11,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{
     domain::{
         AUDIO_BITRATE_PRESETS, AudioCodec, Container, DraftConfig, InputMedia, QualityPreset,
-        RateControlMode, Resolution, TranscodeConfig, VIDEO_BITRATE_PRESETS, quality_crf,
+        RateControlMode, Resolution, TranscodeConfig, VIDEO_BITRATE_PRESETS, quality_setting,
         suggested_output_path, supported_audio_codecs, supported_video_codecs,
     },
     media::probe_media,
@@ -177,6 +177,11 @@ impl App {
         self.refresh_ready_message();
     }
 
+    /// Surfaces a failure that happened outside the app state machine.
+    pub fn report_error(&mut self, message: String) {
+        self.status_message = Some(message);
+    }
+
     pub fn poll_background(&mut self) {
         let events: Vec<_> = self.event_rx.try_iter().collect();
         for event in events {
@@ -259,9 +264,9 @@ impl App {
 
     pub fn quality_label(&self) -> String {
         format!(
-            "{} (CRF {})",
+            "{} ({})",
             self.draft.quality,
-            quality_crf(self.draft.video_codec, self.draft.quality)
+            quality_setting(self.draft.video_codec, self.draft.quality)
         )
     }
 
