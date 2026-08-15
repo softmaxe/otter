@@ -13,14 +13,17 @@ use crate::{
     domain::{AudioCodec, RateControlMode},
 };
 
-const BG: Color = Color::Rgb(14, 18, 24);
-const PANEL: Color = Color::Rgb(25, 31, 41);
-const TEXT: Color = Color::Rgb(222, 228, 236);
-const MUTED: Color = Color::Rgb(130, 143, 158);
-const ACCENT: Color = Color::Rgb(71, 211, 189);
-const SECONDARY: Color = Color::Rgb(111, 159, 255);
-const WARNING: Color = Color::Rgb(244, 190, 76);
-const ERROR: Color = Color::Rgb(255, 107, 129);
+// Catppuccin Mocha palette.
+// See https://catppuccin.com/palette for the reference swatches.
+const BG: Color = Color::Rgb(17, 17, 27); // crust  #11111b
+const PANEL: Color = Color::Rgb(30, 30, 46); // base   #1e1e2e
+const BORDER: Color = Color::Rgb(69, 71, 90); // surface1 #45475a
+const TEXT: Color = Color::Rgb(205, 214, 244); // text   #cdd6f4
+const MUTED: Color = Color::Rgb(127, 132, 156); // overlay1 #7f849c
+const ACCENT: Color = Color::Rgb(148, 226, 213); // teal   #94e2d5
+const SECONDARY: Color = Color::Rgb(137, 180, 250); // blue   #89b4fa
+const WARNING: Color = Color::Rgb(249, 226, 175); // yellow #f9e2af
+const ERROR: Color = Color::Rgb(243, 139, 168); // red    #f38ba8
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(
@@ -503,7 +506,7 @@ fn panel_block(title: &str) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(54, 67, 84)))
+        .border_style(Style::default().fg(BORDER))
         .title(Span::styled(
             format!(" {title} "),
             Style::default().fg(SECONDARY).add_modifier(Modifier::BOLD),
