@@ -219,6 +219,56 @@ fn probes_inputs_and_transcodes_mp4_rate_modes_and_mov_output() {
 }
 
 #[test]
+fn videotoolbox_encoders_produce_playable_output() {
+    let Some(toolchain) = available_toolchain() else {
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let (with_audio, _) = generate_media(&toolchain, &directory);
+    let media = probe_media(&toolchain.ffprobe, &with_audio).expect("input should be probed");
+
+    for (codec, name, expected) in [
+        (VideoCodec::H264Hw, "hardware.mp4", "h264"),
+        (VideoCodec::H265Hw, "hardware.mov", "hevc"),
+    ] {
+        if !toolchain.supports_video(codec) {
+            eprintln!("Skipping {codec}: {} is unavailable.", codec.encoder());
+            continue;
+        }
+        let output = directory.path().join(name);
+        let draft = DraftConfig {
+            input: Some(with_audio.clone()),
+            output: Some(output.clone()),
+            container: if codec == VideoCodec::H265Hw {
+                Container::Mov
+            } else {
+                Container::Mp4
+            },
+            video_codec: codec,
+            resolution: Resolution::P480,
+            quality: QualityPreset::Balanced,
+            ..DraftConfig::default()
+        };
+        let config = draft
+            .validated(&media)
+            .expect("hardware configuration should be valid");
+        let artifact = OutputArtifact::reserve(output).expect("output should be reserved");
+        let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
+        let (event_tx, event_rx) = mpsc::channel();
+        let _handle = spawn_transcode_worker(spec, artifact, media.duration, event_tx);
+
+        let output = wait_for_finished(&event_rx);
+        let result = probe_media(&toolchain.ffprobe, &output).expect("output should be probed");
+        assert_eq!(result.video.codec, expected);
+        assert_eq!((result.video.width, result.video.height), (320, 180));
+        assert_eq!(
+            result.audio.as_ref().map(|audio| audio.codec.as_str()),
+            Some("aac")
+        );
+    }
+}
+
+#[test]
 fn cancellation_removes_final_and_temporary_outputs() {
     let Some(toolchain) = available_toolchain() else {
         return;

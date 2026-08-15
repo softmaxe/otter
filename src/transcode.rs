@@ -18,8 +18,8 @@ use tempfile::{Builder, TempDir};
 use thiserror::Error;
 
 use crate::domain::{
-    AudioCodec, Container, InputMedia, TranscodeConfig, VideoCodec, VideoRateControl, quality_crf,
-    scale_filter,
+    AudioCodec, Container, InputMedia, TranscodeConfig, VideoCodec, VideoRateControl,
+    quality_setting, scale_filter,
 };
 
 #[derive(Debug, Clone)]
@@ -95,14 +95,14 @@ pub fn build_command_spec(
     media: &InputMedia,
     artifact: &OutputArtifact,
 ) -> CommandSpec {
-    let mut args = os_args([
-        "-hide_banner",
-        "-nostdin",
-        "-n",
-        "-loglevel",
-        "warning",
-        "-i",
-    ]);
+    let mut args = os_args(["-hide_banner", "-nostdin", "-n", "-loglevel", "warning"]);
+    if config.video_codec.is_hardware() {
+        // Decode on the media engine too. FFmpeg silently falls back to software
+        // decoding for formats VideoToolbox cannot handle, so this is safe to set
+        // unconditionally for hardware jobs.
+        args.extend(os_args(["-hwaccel", "videotoolbox"]));
+    }
+    args.push(OsString::from("-i"));
     args.push(config.input.as_os_str().to_owned());
     args.extend(os_args(["-map", "0:v:0"]));
     if config.audio_codec == AudioCodec::None || media.audio.is_none() {
@@ -127,7 +127,7 @@ pub fn build_command_spec(
     append_rate_control_args(&mut args, config.video_codec, config.video_rate_control);
 
     if matches!(config.container, Container::Mp4 | Container::Mov) {
-        if config.video_codec == VideoCodec::H265 {
+        if config.video_codec.is_hevc() {
             args.extend(os_args(["-tag:v", "hvc1"]));
         }
         args.extend(os_args(["-movflags", "+faststart"]));
@@ -155,6 +155,11 @@ fn append_video_encoder_args(args: &mut Vec<OsString>, codec: VideoCodec) {
         VideoCodec::Vp9 => {
             args.extend(os_args(["-deadline", "good", "-pix_fmt", "yuv420p"]));
         }
+        // VideoToolbox has no speed preset, and pinning the pixel format would add a
+        // pointless conversion before the encoder uploads the frame anyway. Leaving
+        // `-allow_sw` at its default keeps the job on the media engine or fails
+        // immediately, instead of quietly falling back to a slow software path.
+        VideoCodec::H264Hw | VideoCodec::H265Hw => {}
     }
 }
 
@@ -168,7 +173,11 @@ fn append_rate_control_args(
             if codec == VideoCodec::Vp9 {
                 args.extend(os_args(["-b:v", "0"]));
             }
-            args.extend(os_args(["-crf", &quality_crf(codec, quality).to_string()]));
+            let setting = quality_setting(codec, quality);
+            args.extend([
+                OsString::from(setting.flag),
+                OsString::from(setting.value.to_string()),
+            ]);
         }
         VideoRateControl::Bitrate(kbps) => {
             args.extend(os_args(["-b:v", &format!("{kbps}k")]));
@@ -530,6 +539,68 @@ mod tests {
                     .any(|pair| pair == ["-movflags", "+faststart"])
             );
         }
+    }
+
+    #[test]
+    fn hardware_encoders_use_videotoolbox_flags() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("source.mp4");
+        fs::write(&input, b"test").unwrap();
+        let output = directory.path().join("hw.mp4");
+        let artifact = OutputArtifact::reserve(output.clone()).unwrap();
+        let mut transcode_config = config(
+            input.clone(),
+            output,
+            VideoRateControl::Quality(QualityPreset::Balanced),
+        );
+        transcode_config.video_codec = VideoCodec::H265Hw;
+
+        let spec = build_command_spec(
+            Path::new("/usr/bin/ffmpeg"),
+            &transcode_config,
+            &media(input.clone()),
+            &artifact,
+        );
+        let args = spec
+            .args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>();
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-hwaccel", "videotoolbox"])
+        );
+        // Hardware decoding only helps when it is selected before the input.
+        let hwaccel = args.iter().position(|value| value == "-hwaccel").unwrap();
+        let input_flag = args.iter().position(|value| value == "-i").unwrap();
+        assert!(hwaccel < input_flag);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-c:v", "hevc_videotoolbox"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["-q:v", "55"]));
+        assert!(args.windows(2).any(|pair| pair == ["-tag:v", "hvc1"]));
+        // VideoToolbox rejects libx26x-style speed presets.
+        assert!(!args.iter().any(|value| value == "-preset"));
+        assert!(!args.iter().any(|value| value == "-crf"));
+
+        // Software jobs must not pick up hardware decoding.
+        transcode_config.video_codec = VideoCodec::H265;
+        let software = build_command_spec(
+            Path::new("/usr/bin/ffmpeg"),
+            &transcode_config,
+            &media(input),
+            &artifact,
+        );
+        let software_args = software
+            .args
+            .iter()
+            .map(|value| value.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert!(!software_args.iter().any(|value| value == "-hwaccel"));
+        assert!(software_args.windows(2).any(|pair| pair == ["-crf", "26"]));
     }
 
     #[test]

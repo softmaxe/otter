@@ -49,29 +49,52 @@ impl fmt::Display for Container {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoCodec {
     H264,
+    H264Hw,
     H265,
+    H265Hw,
     Av1,
     Vp9,
 }
 
 impl VideoCodec {
-    pub const ALL: [Self; 4] = [Self::H264, Self::H265, Self::Av1, Self::Vp9];
+    pub const ALL: [Self; 6] = [
+        Self::H264,
+        Self::H264Hw,
+        Self::H265,
+        Self::H265Hw,
+        Self::Av1,
+        Self::Vp9,
+    ];
 
     pub const fn encoder(self) -> &'static str {
         match self {
             Self::H264 => "libx264",
+            Self::H264Hw => "h264_videotoolbox",
             Self::H265 => "libx265",
+            Self::H265Hw => "hevc_videotoolbox",
             Self::Av1 => "libsvtav1",
             Self::Vp9 => "libvpx-vp9",
         }
+    }
+
+    /// VideoToolbox encoders run on the Apple media engine instead of the CPU.
+    pub const fn is_hardware(self) -> bool {
+        matches!(self, Self::H264Hw | Self::H265Hw)
+    }
+
+    /// HEVC needs the `hvc1` tag to stay playable in QuickTime containers.
+    pub const fn is_hevc(self) -> bool {
+        matches!(self, Self::H265 | Self::H265Hw)
     }
 }
 
 impl fmt::Display for VideoCodec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::H264 => "H.264 (libx264)",
-            Self::H265 => "H.265 (libx265)",
+            Self::H264 => "H.264 (libx264, CPU)",
+            Self::H264Hw => "H.264 (VideoToolbox, GPU)",
+            Self::H265 => "H.265 (libx265, CPU)",
+            Self::H265Hw => "H.265 (VideoToolbox, GPU)",
             Self::Av1 => "AV1 (SVT-AV1)",
             Self::Vp9 => "VP9 (libvpx-vp9)",
         })
@@ -164,7 +187,7 @@ pub enum RateControlMode {
 impl fmt::Display for RateControlMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::Quality => "Quality (CRF)",
+            Self::Quality => "Constant quality",
             Self::Bitrate => "Target bitrate",
         })
     }
@@ -355,7 +378,13 @@ pub enum ValidationError {
 
 pub const fn supported_video_codecs(container: Container) -> &'static [VideoCodec] {
     match container {
-        Container::Mp4 | Container::Mov => &[VideoCodec::H264, VideoCodec::H265, VideoCodec::Av1],
+        Container::Mp4 | Container::Mov => &[
+            VideoCodec::H264,
+            VideoCodec::H264Hw,
+            VideoCodec::H265,
+            VideoCodec::H265Hw,
+            VideoCodec::Av1,
+        ],
         Container::Matroska => &VideoCodec::ALL,
         Container::WebM => &[VideoCodec::Av1, VideoCodec::Vp9],
     }
@@ -383,21 +412,47 @@ pub const fn default_audio_codec(container: Container) -> AudioCodec {
     }
 }
 
-pub const fn quality_crf(codec: VideoCodec, quality: QualityPreset) -> u8 {
-    match (codec, quality) {
-        (VideoCodec::H264, QualityPreset::High) => 18,
-        (VideoCodec::H264, QualityPreset::Balanced) => 23,
-        (VideoCodec::H264, QualityPreset::Small) => 28,
-        (VideoCodec::H265, QualityPreset::High) => 20,
-        (VideoCodec::H265, QualityPreset::Balanced) => 26,
-        (VideoCodec::H265, QualityPreset::Small) => 30,
-        (VideoCodec::Av1, QualityPreset::High) => 28,
-        (VideoCodec::Av1, QualityPreset::Balanced) => 35,
-        (VideoCodec::Av1, QualityPreset::Small) => 42,
-        (VideoCodec::Vp9, QualityPreset::High) => 24,
-        (VideoCodec::Vp9, QualityPreset::Balanced) => 32,
-        (VideoCodec::Vp9, QualityPreset::Small) => 40,
+/// The constant-quality flag and value that drive one encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QualitySetting {
+    /// `-crf` for software encoders, `-q:v` for VideoToolbox.
+    pub flag: &'static str,
+    pub value: u8,
+}
+
+impl fmt::Display for QualitySetting {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = if self.flag == "-crf" { "CRF" } else { "Q" };
+        write!(f, "{name} {}", self.value)
     }
+}
+
+/// Software encoders take a CRF where lower is better. VideoToolbox has no CRF; it
+/// exposes an inverted 1–100 constant-quality scale through `-q:v`. The hardware
+/// values below were calibrated against the software presets with VMAF so that both
+/// paths land on comparable quality for the same preset.
+pub const fn quality_setting(codec: VideoCodec, quality: QualityPreset) -> QualitySetting {
+    let (flag, value) = match (codec, quality) {
+        (VideoCodec::H264, QualityPreset::High) => ("-crf", 18),
+        (VideoCodec::H264, QualityPreset::Balanced) => ("-crf", 23),
+        (VideoCodec::H264, QualityPreset::Small) => ("-crf", 28),
+        (VideoCodec::H264Hw, QualityPreset::High) => ("-q:v", 70),
+        (VideoCodec::H264Hw, QualityPreset::Balanced) => ("-q:v", 60),
+        (VideoCodec::H264Hw, QualityPreset::Small) => ("-q:v", 47),
+        (VideoCodec::H265, QualityPreset::High) => ("-crf", 20),
+        (VideoCodec::H265, QualityPreset::Balanced) => ("-crf", 26),
+        (VideoCodec::H265, QualityPreset::Small) => ("-crf", 30),
+        (VideoCodec::H265Hw, QualityPreset::High) => ("-q:v", 65),
+        (VideoCodec::H265Hw, QualityPreset::Balanced) => ("-q:v", 55),
+        (VideoCodec::H265Hw, QualityPreset::Small) => ("-q:v", 47),
+        (VideoCodec::Av1, QualityPreset::High) => ("-crf", 28),
+        (VideoCodec::Av1, QualityPreset::Balanced) => ("-crf", 35),
+        (VideoCodec::Av1, QualityPreset::Small) => ("-crf", 42),
+        (VideoCodec::Vp9, QualityPreset::High) => ("-crf", 24),
+        (VideoCodec::Vp9, QualityPreset::Balanced) => ("-crf", 32),
+        (VideoCodec::Vp9, QualityPreset::Small) => ("-crf", 40),
+    };
+    QualitySetting { flag, value }
 }
 
 pub fn scale_filter(resolution: Resolution) -> Option<String> {
@@ -483,9 +538,64 @@ mod tests {
 
     #[test]
     fn quality_values_are_codec_specific() {
-        assert_eq!(quality_crf(VideoCodec::H264, QualityPreset::Balanced), 23);
-        assert_eq!(quality_crf(VideoCodec::Av1, QualityPreset::Balanced), 35);
-        assert_eq!(quality_crf(VideoCodec::Vp9, QualityPreset::Small), 40);
+        let balanced_h264 = quality_setting(VideoCodec::H264, QualityPreset::Balanced);
+        assert_eq!(balanced_h264.flag, "-crf");
+        assert_eq!(balanced_h264.value, 23);
+        assert_eq!(balanced_h264.to_string(), "CRF 23");
+        assert_eq!(
+            quality_setting(VideoCodec::Av1, QualityPreset::Balanced).value,
+            35
+        );
+        assert_eq!(
+            quality_setting(VideoCodec::Vp9, QualityPreset::Small).value,
+            40
+        );
+    }
+
+    #[test]
+    fn hardware_encoders_use_an_inverted_quality_scale() {
+        for codec in [VideoCodec::H264Hw, VideoCodec::H265Hw] {
+            assert!(codec.is_hardware());
+            let mut previous = u8::MAX;
+            for quality in QualityPreset::ALL {
+                let setting = quality_setting(codec, quality);
+                assert_eq!(setting.flag, "-q:v");
+                // Higher `-q:v` means better quality, so the presets must descend.
+                assert!(
+                    setting.value < previous,
+                    "{codec} {quality} is not descending"
+                );
+                previous = setting.value;
+            }
+        }
+        assert_eq!(
+            quality_setting(VideoCodec::H264Hw, QualityPreset::Balanced).to_string(),
+            "Q 60"
+        );
+        assert!(!VideoCodec::H264.is_hardware());
+        assert!(VideoCodec::H265Hw.is_hevc());
+        assert!(!VideoCodec::H264Hw.is_hevc());
+    }
+
+    #[test]
+    fn quicktime_containers_offer_both_hardware_and_software_h26x() {
+        for container in [Container::Mp4, Container::Mov] {
+            let codecs = supported_video_codecs(container);
+            for codec in [
+                VideoCodec::H264,
+                VideoCodec::H264Hw,
+                VideoCodec::H265,
+                VideoCodec::H265Hw,
+            ] {
+                assert!(codecs.contains(&codec), "{container} should allow {codec}");
+            }
+        }
+        // VideoToolbox cannot produce VP9 or AV1, so WebM stays software-only.
+        assert!(
+            !supported_video_codecs(Container::WebM)
+                .iter()
+                .any(|codec| codec.is_hardware())
+        );
     }
 
     #[test]
