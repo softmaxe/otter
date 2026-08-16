@@ -22,9 +22,9 @@ pub struct Toolchain {
 impl Toolchain {
     pub fn discover() -> Result<Self, ToolError> {
         let ffmpeg =
-            resolve_tool("FFMPEG_TUI_FFMPEG", "ffmpeg").ok_or(ToolError::NotFound("ffmpeg"))?;
+            resolve_tool("FFTUI_FFMPEG", "ffmpeg").ok_or(ToolError::NotFound("ffmpeg"))?;
         let ffprobe =
-            resolve_tool("FFMPEG_TUI_FFPROBE", "ffprobe").ok_or(ToolError::NotFound("ffprobe"))?;
+            resolve_tool("FFTUI_FFPROBE", "ffprobe").ok_or(ToolError::NotFound("ffprobe"))?;
         let ffmpeg_version = version_line(&ffmpeg)?;
         let ffprobe_version = version_line(&ffprobe)?;
         let encoders = detect_encoders(&ffmpeg)?;
@@ -174,6 +174,6 @@ mod tests {
 
     #[test]
     fn nonexistent_override_falls_back_instead_of_panicking() {
-        assert!(resolve_tool("FFMPEG_TUI_TEST_MISSING", "definitely-not-a-real-binary").is_none());
+        assert!(resolve_tool("FFTUI_TEST_MISSING", "definitely-not-a-real-binary").is_none());
     }
 }

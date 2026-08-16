@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ffmpeg_tui::{
+use fftui::{
     domain::{
         AudioCodec, Container, DraftConfig, QualityPreset, RateControlMode, Resolution, VideoCodec,
     },
@@ -354,6 +354,6 @@ fn has_app_temporary_directory(directory: &Path) -> bool {
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".ffmpeg-tui-")
+                .starts_with(".fftui-")
         })
 }

@@ -63,7 +63,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let ffmpeg_version = short_version(&app.toolchain.ffmpeg_version);
     let title = Line::from(vec![
         Span::styled(
-            " FFMPEG TUI ",
+            " FFTUI ",
             Style::default()
                 .fg(BG)
                 .bg(ACCENT)
@@ -594,7 +594,7 @@ mod tests {
     fn renders_configure_and_help_in_english() {
         let mut app = test_app();
         let configured = render_text(&app, 100, 30);
-        assert!(configured.contains("FFMPEG TUI"));
+        assert!(configured.contains("FFTUI"));
         assert!(configured.contains("No input selected"));
         assert!(configured.contains("Rate control"));
         assert!(configured.contains("Balanced (CRF 23)"));
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn renders_without_panicking_in_small_terminals() {
         let app = test_app();
-        assert!(render_text(&app, 80, 24).contains("FFMPEG TUI"));
-        assert!(render_text(&app, 60, 20).contains("FFMPEG TUI"));
+        assert!(render_text(&app, 80, 24).contains("FFTUI"));
+        assert!(render_text(&app, 60, 20).contains("FFTUI"));
     }
 }

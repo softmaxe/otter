@@ -1,8 +1,8 @@
-# FFmpeg TUI
+# fftui
 
 A macOS-first terminal interface for configuring and running single-file FFmpeg transcodes without writing FFmpeg commands by hand.
 
-FFmpeg TUI lets you choose an input and output with native file dialogs, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
+fftui lets you choose an input and output with native file dialogs, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
 
 ## Features
 
@@ -33,11 +33,11 @@ Install the required tools with Homebrew:
 brew install rust ffmpeg
 ```
 
-FFmpeg TUI searches `PATH`, `/opt/homebrew/bin`, and `/usr/local/bin`. Custom binary locations can be selected with environment variables:
+fftui searches `PATH`, `/opt/homebrew/bin`, and `/usr/local/bin`. Custom binary locations can be selected with environment variables:
 
 ```sh
-FFMPEG_TUI_FFMPEG=/custom/path/ffmpeg \
-FFMPEG_TUI_FFPROBE=/custom/path/ffprobe \
+FFTUI_FFMPEG=/custom/path/ffmpeg \
+FFTUI_FFPROBE=/custom/path/ffprobe \
 cargo run --release
 ```
 
@@ -45,7 +45,7 @@ cargo run --release
 
 ```sh
 cargo build --release
-./target/release/ffmpeg-tui
+./target/release/fftui
 ```
 
 For development:
@@ -175,13 +175,13 @@ Select Source to keep the original dimensions.
 
 ## Output safety
 
-FFmpeg TUI never executes the preview through a shell. Program arguments remain separate values, so spaces, quotes, Unicode, and shell metacharacters in paths are not interpreted as shell syntax.
+fftui never executes the preview through a shell. Program arguments remain separate values, so spaces, quotes, Unicode, and shell metacharacters in paths are not interpreted as shell syntax.
 
 The application also:
 
 - rejects an output path that matches the input;
 - refuses to overwrite an existing final output;
-- writes into an app-owned `.ffmpeg-tui-*` directory beside the destination; and
+- writes into an app-owned `.fftui-*` directory beside the destination; and
 - atomically renames the completed temporary file to the final path only after FFmpeg succeeds.
 
 Failed and cancelled jobs remove the app-owned temporary directory. Cancellation sends FFmpeg `SIGINT` first and force-stops it only if it does not exit within approximately three seconds.
