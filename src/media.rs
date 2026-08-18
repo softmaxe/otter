@@ -83,21 +83,56 @@ fn parse_probe_json(path: PathBuf, bytes: &[u8]) -> Result<InputMedia, ProbeErro
         .and_then(|format| format.duration.as_deref())
         .and_then(parse_duration)
         .or_else(|| video.duration.as_deref().and_then(parse_duration));
+    // `avg_frame_rate` is the honest average for variable-rate sources; `r_frame_rate`
+    // is the container's nominal rate and only fills in when the average is absent or
+    // degenerate (ffprobe reports "0/0" for streams it cannot measure).
+    let frame_rate = video
+        .avg_frame_rate
+        .as_deref()
+        .and_then(parse_frame_rate)
+        .or_else(|| video.r_frame_rate.as_deref().and_then(parse_frame_rate));
+    let video_bitrate_kbps = video.bit_rate.as_deref().and_then(parse_bitrate_kbps);
+    let codec = video
+        .codec_name
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    let format = response.format;
 
     Ok(InputMedia {
         path,
         duration,
         video: VideoStreamInfo {
-            codec: video
-                .codec_name
-                .clone()
-                .unwrap_or_else(|| "unknown".to_owned()),
+            codec,
             width,
             height,
+            frame_rate,
+            bitrate_kbps: video_bitrate_kbps,
         },
         audio,
-        format_name: response.format.and_then(|format| format.format_name),
+        size_bytes: format
+            .as_ref()
+            .and_then(|format| format.size.as_deref())
+            .and_then(|value| value.parse::<u64>().ok()),
+        bitrate_kbps: format
+            .as_ref()
+            .and_then(|format| format.bit_rate.as_deref())
+            .and_then(parse_bitrate_kbps),
+        format_name: format.and_then(|format| format.format_name),
     })
+}
+
+/// ffprobe reports frame rates as the rational `num/den`, using `0/0` when unknown.
+fn parse_frame_rate(value: &str) -> Option<f64> {
+    let (numerator, denominator) = value.split_once('/')?;
+    let numerator = numerator.trim().parse::<f64>().ok()?;
+    let denominator = denominator.trim().parse::<f64>().ok()?;
+    let rate = numerator / denominator;
+    (rate.is_finite() && rate > 0.0).then_some(rate)
+}
+
+fn parse_bitrate_kbps(value: &str) -> Option<u32> {
+    let bits_per_second = value.parse::<u64>().ok()?;
+    (bits_per_second > 0).then(|| u32::try_from(bits_per_second / 1_000).unwrap_or(u32::MAX))
 }
 
 fn parse_duration(value: &str) -> Option<Duration> {
@@ -136,12 +171,17 @@ struct ProbeStream {
     duration: Option<String>,
     channels: Option<u32>,
     sample_rate: Option<String>,
+    bit_rate: Option<String>,
+    r_frame_rate: Option<String>,
+    avg_frame_rate: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ProbeFormat {
     format_name: Option<String>,
     duration: Option<String>,
+    bit_rate: Option<String>,
+    size: Option<String>,
 }
 
 #[cfg(test)]
@@ -164,6 +204,45 @@ mod tests {
         assert_eq!(media.video.height, 1080);
         assert_eq!(media.audio.unwrap().sample_rate, Some(48_000));
         assert_eq!(media.duration, Some(Duration::from_secs_f64(12.5)));
+    }
+
+    #[test]
+    fn captures_the_fields_the_size_estimate_needs() {
+        let json = br#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
+                 "bit_rate":"7500000","r_frame_rate":"30000/1001","avg_frame_rate":"24000/1001"},
+                {"codec_type":"audio","codec_name":"aac","channels":2}
+            ],
+            "format":{"format_name":"mov,mp4","duration":"60","bit_rate":"7692000","size":"57690000"}
+        }"#;
+
+        let media = parse_probe_json(PathBuf::from("clip.mp4"), json).unwrap();
+
+        // The measured average wins over the container's nominal rate.
+        assert_eq!(media.video.frame_rate, Some(24_000.0 / 1_001.0));
+        assert_eq!(media.video.bitrate_kbps, Some(7_500));
+        assert_eq!(media.bitrate_kbps, Some(7_692));
+        assert_eq!(media.size_bytes, Some(57_690_000));
+    }
+
+    #[test]
+    fn tolerates_unmeasurable_frame_rates_and_bitrates() {
+        let json = br#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
+                 "bit_rate":"N/A","avg_frame_rate":"0/0","r_frame_rate":"25/1"}
+            ],
+            "format":{"format_name":"matroska","duration":"60","bit_rate":"N/A","size":"N/A"}
+        }"#;
+
+        let media = parse_probe_json(PathBuf::from("clip.mkv"), json).unwrap();
+
+        // `0/0` is ffprobe's "unknown", so the nominal rate fills in.
+        assert_eq!(media.video.frame_rate, Some(25.0));
+        assert_eq!(media.video.bitrate_kbps, None);
+        assert_eq!(media.bitrate_kbps, None);
+        assert_eq!(media.size_bytes, None);
     }
 
     #[test]

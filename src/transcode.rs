@@ -429,6 +429,8 @@ mod tests {
                 codec: "h264".to_owned(),
                 width: 1920,
                 height: 1080,
+                frame_rate: Some(30.0),
+                bitrate_kbps: Some(8_000),
             },
             audio: Some(AudioStreamInfo {
                 codec: "aac".to_owned(),
@@ -436,6 +438,8 @@ mod tests {
                 sample_rate: Some(48_000),
             }),
             format_name: Some("mov,mp4".to_owned()),
+            size_bytes: Some(10_000_000),
+            bitrate_kbps: Some(8_192),
         }
     }
 

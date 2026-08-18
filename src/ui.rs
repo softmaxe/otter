@@ -10,7 +10,7 @@ use ratatui::{
 
 use crate::{
     app::{App, ConfigField, JobState, Screen},
-    domain::{AudioCodec, RateControlMode},
+    domain::{AudioCodec, EstimateBasis, RateControlMode, SizeEstimate},
 };
 
 // Catppuccin Mocha palette.
@@ -36,7 +36,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Length(4),
-            Constraint::Length(11),
+            Constraint::Length(12),
             Constraint::Min(4),
             Constraint::Length(1),
         ])
@@ -207,16 +207,54 @@ fn render_settings(frame: &mut Frame<'_>, app: &App, area: Rect) {
             audio_bitrate_enabled,
         ),
     ];
-    let lines = rows
+    let mut lines = rows
         .into_iter()
         .map(|(field, label, value, enabled)| setting_line(app, field, label, value, enabled))
         .collect::<Vec<_>>();
+    lines.push(estimate_line(app));
     frame.render_widget(
         Paragraph::new(lines)
             .block(panel_block("SETTINGS"))
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+/// The predicted output size. Read-only, so it sits outside the focus ring and skips
+/// the selection marker the editable rows above it use.
+fn estimate_line<'a>(app: &App) -> Line<'a> {
+    let (value, style) = match app.size_estimate() {
+        Some(estimate) => (
+            estimate.label(),
+            Style::default().fg(estimate_color(estimate)),
+        ),
+        None => (
+            estimate_placeholder(app).to_owned(),
+            Style::default().fg(MUTED),
+        ),
+    };
+    Line::from(vec![
+        Span::styled(format!("  {:<16}", "Est. size"), Style::default().fg(MUTED)),
+        Span::styled(format!(" {value} "), style),
+    ])
+}
+
+/// Targeted estimates get the same weight as a real setting; heuristic ones are muted
+/// toward the advisory palette so a rough number never reads as a measured one.
+fn estimate_color(estimate: SizeEstimate) -> Color {
+    match estimate.basis {
+        EstimateBasis::Targeted => SECONDARY,
+        EstimateBasis::Heuristic => MUTED,
+    }
+}
+
+fn estimate_placeholder(app: &App) -> &'static str {
+    match app.media {
+        // Every path through the estimate multiplies by duration, so without one there
+        // is nothing to show but the reason.
+        Some(_) => "Unknown (source has no duration)",
+        None => "Awaiting source",
+    }
 }
 
 fn setting_line<'a>(
@@ -291,7 +329,7 @@ fn render_confirmation(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .command_preview
         .as_deref()
         .unwrap_or("Command preview unavailable.");
-    let text = Text::from(vec![
+    let mut text = Text::from(vec![
         Line::styled(
             "Review the exact program and arguments. Output is written to an app-owned temporary file first.",
             Style::default().fg(WARNING),
@@ -299,6 +337,16 @@ fn render_confirmation(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Line::default(),
         Line::styled(preview, Style::default().fg(TEXT)),
     ]);
+    if let Some(estimate) = app.size_estimate() {
+        text.push_line(Line::default());
+        text.push_line(Line::from(vec![
+            Span::styled("Estimated output size  ", Style::default().fg(MUTED)),
+            Span::styled(
+                estimate.label(),
+                Style::default().fg(estimate_color(estimate)),
+            ),
+        ]));
+    }
     frame.render_widget(
         Paragraph::new(text)
             .block(panel_block("CONFIRM COMMAND"))
@@ -561,10 +609,35 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
-    use crate::{domain::RateControlMode, toolchain::Toolchain};
+    use crate::{
+        domain::{AudioStreamInfo, InputMedia, RateControlMode, VideoStreamInfo},
+        toolchain::Toolchain,
+    };
 
     fn test_app() -> App {
         App::new(Toolchain::test_fixture())
+    }
+
+    fn probed_media() -> InputMedia {
+        InputMedia {
+            path: PathBuf::from("clip.mp4"),
+            duration: Some(Duration::from_secs(10)),
+            video: VideoStreamInfo {
+                codec: "h264".to_owned(),
+                width: 1920,
+                height: 1080,
+                frame_rate: Some(30.0),
+                bitrate_kbps: Some(100_000),
+            },
+            audio: Some(AudioStreamInfo {
+                codec: "aac".to_owned(),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+            }),
+            format_name: Some("mov,mp4".to_owned()),
+            size_bytes: Some(125_000_000),
+            bitrate_kbps: Some(100_000),
+        }
     }
 
     fn render_text(app: &App, width: u16, height: u16) -> String {
@@ -654,6 +727,35 @@ mod tests {
         let error = render_text(&app, 100, 30);
         assert!(error.contains("ERROR"));
         assert!(error.contains("Encoder failed"));
+    }
+
+    #[test]
+    fn renders_the_estimated_output_size() {
+        let mut app = test_app();
+        assert!(
+            render_text(&app, 100, 30).contains("Est. size        Awaiting source"),
+            "the estimate row should explain why it is empty"
+        );
+
+        app.media = Some(probed_media());
+        app.draft.rate_control_mode = RateControlMode::Bitrate;
+        app.draft.video_bitrate_kbps = 5_000;
+        app.draft.audio_bitrate_kbps = 192;
+        let targeted = render_text(&app, 100, 30);
+        assert!(targeted.contains("Est. size"));
+        assert!(targeted.contains("~6.6 MB"), "{targeted}");
+        assert!(!targeted.contains("(rough)"));
+
+        app.draft.rate_control_mode = RateControlMode::Quality;
+        let heuristic = render_text(&app, 100, 30);
+        assert!(heuristic.contains("(rough)"), "{heuristic}");
+
+        // A source whose duration ffprobe could not read must say so, not guess.
+        app.media = Some(InputMedia {
+            duration: None,
+            ..probed_media()
+        });
+        assert!(render_text(&app, 100, 30).contains("Unknown (source has no duration)"));
     }
 
     #[test]

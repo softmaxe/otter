@@ -338,6 +338,10 @@ pub struct InputMedia {
     pub video: VideoStreamInfo,
     pub audio: Option<AudioStreamInfo>,
     pub format_name: Option<String>,
+    /// Container size on disk, when ffprobe reported it.
+    pub size_bytes: Option<u64>,
+    /// Overall container bitrate, covering every stream plus muxing overhead.
+    pub bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -345,6 +349,10 @@ pub struct VideoStreamInfo {
     pub codec: String,
     pub width: u32,
     pub height: u32,
+    /// Frames per second, absent when ffprobe could not measure the stream.
+    pub frame_rate: Option<f64>,
+    /// Bitrate of this stream alone; many containers omit it.
+    pub bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +469,182 @@ pub fn scale_filter(resolution: Resolution) -> Option<String> {
             "scale=w='min({width},iw)':h='min({height},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
         )
     })
+}
+
+/// Muxing overhead — index tables, per-packet headers, interleaving padding — that
+/// the raw stream bitrates do not account for.
+const CONTAINER_OVERHEAD: f64 = 1.02;
+
+/// Pixel count the bits-per-pixel table is calibrated against (1080p).
+const REFERENCE_PIXELS: f64 = 1920.0 * 1080.0;
+
+/// Frame rate assumed when ffprobe could not measure the source.
+const FALLBACK_FRAME_RATE: f64 = 30.0;
+
+/// Constant-quality encoders spend fewer bits per pixel as the frame grows, because
+/// detail that mattered at 480p is invisible at 4K. Modelling that falloff as
+/// `(pixels / REFERENCE_PIXELS) ^ -exponent` keeps one table usable across the whole
+/// resolution ladder instead of needing a row per resolution.
+const RESOLUTION_FALLOFF_EXPONENT: f64 = 0.25;
+
+/// How large the configured output is expected to be, and how much to trust it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeEstimate {
+    pub bytes: u64,
+    pub basis: EstimateBasis,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstimateBasis {
+    /// Read off the bitrate the user asked for. Accurate to a few percent.
+    Targeted,
+    /// Inferred from the bits-per-pixel model. A guide, not a promise.
+    Heuristic,
+}
+
+impl SizeEstimate {
+    /// The settings-panel value, marking heuristic numbers so an inferred figure is
+    /// never mistaken for a computed one.
+    pub fn label(self) -> String {
+        match self.basis {
+            EstimateBasis::Targeted => format!("~{}", format_size(self.bytes)),
+            EstimateBasis::Heuristic => format!("~{} (rough)", format_size(self.bytes)),
+        }
+    }
+}
+
+/// Predicts the size of the file this draft would produce.
+///
+/// Returns `None` when the source duration is unknown, because every path through the
+/// model multiplies by it — showing nothing beats showing a fabricated number.
+pub fn estimate_output_size(draft: &DraftConfig, media: &InputMedia) -> Option<SizeEstimate> {
+    let seconds = media.duration?.as_secs_f64();
+    if seconds <= 0.0 || !seconds.is_finite() {
+        return None;
+    }
+    let audio_kbps = if draft.audio_codec == AudioCodec::None || media.audio.is_none() {
+        0.0
+    } else {
+        f64::from(draft.audio_bitrate_kbps)
+    };
+    let (video_kbps, basis) = match draft.rate_control_mode {
+        RateControlMode::Bitrate => (f64::from(draft.video_bitrate_kbps), EstimateBasis::Targeted),
+        RateControlMode::Quality => (
+            quality_video_bitrate_kbps(draft, media),
+            EstimateBasis::Heuristic,
+        ),
+    };
+    let bits = (video_kbps + audio_kbps) * 1_000.0 * seconds * CONTAINER_OVERHEAD;
+    Some(SizeEstimate {
+        bytes: (bits / 8.0) as u64,
+        basis,
+    })
+}
+
+/// Bits per pixel per frame each encoder spends at 1080p on typical live-action
+/// content, for the constant-quality settings in [`quality_setting`].
+///
+/// These are published rules of thumb rather than measurements from this project's own
+/// encodes. Content dominates every term in the model — a static screen recording
+/// lands far below these figures and heavy grain far above — so the result is a guide.
+/// Recalibrating the quality estimate means editing this table and nothing else.
+fn quality_bits_per_pixel(codec: VideoCodec, quality: QualityPreset) -> f64 {
+    match (codec, quality) {
+        (VideoCodec::H264, QualityPreset::High) => 0.150,
+        (VideoCodec::H264, QualityPreset::Balanced) => 0.075,
+        (VideoCodec::H264, QualityPreset::Small) => 0.038,
+        // VideoToolbox trades efficiency for speed: matching the software presets on
+        // quality costs it roughly half again as many bits.
+        (VideoCodec::H264Hw, QualityPreset::High) => 0.230,
+        (VideoCodec::H264Hw, QualityPreset::Balanced) => 0.115,
+        (VideoCodec::H264Hw, QualityPreset::Small) => 0.058,
+        (VideoCodec::H265, QualityPreset::High) => 0.100,
+        (VideoCodec::H265, QualityPreset::Balanced) => 0.048,
+        (VideoCodec::H265, QualityPreset::Small) => 0.030,
+        (VideoCodec::H265Hw, QualityPreset::High) => 0.145,
+        (VideoCodec::H265Hw, QualityPreset::Balanced) => 0.070,
+        (VideoCodec::H265Hw, QualityPreset::Small) => 0.042,
+        (VideoCodec::Av1, QualityPreset::High) => 0.085,
+        (VideoCodec::Av1, QualityPreset::Balanced) => 0.042,
+        (VideoCodec::Av1, QualityPreset::Small) => 0.022,
+        (VideoCodec::Vp9, QualityPreset::High) => 0.105,
+        (VideoCodec::Vp9, QualityPreset::Balanced) => 0.050,
+        (VideoCodec::Vp9, QualityPreset::Small) => 0.026,
+    }
+}
+
+fn quality_video_bitrate_kbps(draft: &DraftConfig, media: &InputMedia) -> f64 {
+    let (width, height) = output_dimensions(draft.resolution, &media.video);
+    let pixels = f64::from(width) * f64::from(height);
+    let frame_rate = media.video.frame_rate.unwrap_or(FALLBACK_FRAME_RATE);
+    let falloff = (pixels / REFERENCE_PIXELS).powf(-RESOLUTION_FALLOFF_EXPONENT);
+    let kbps =
+        quality_bits_per_pixel(draft.video_codec, draft.quality) * falloff * pixels * frame_rate
+            / 1_000.0;
+
+    match source_video_bitrate_kbps(media) {
+        // A lossy re-encode that does not enlarge the frame practically never needs
+        // more bits than the source already spent, so the source doubles as a ceiling
+        // and pulls the estimate back down for already-compressed inputs. It is the
+        // wrong ceiling in exactly one case: a high-quality preset applied to a badly
+        // compressed source, where faithfully preserving the existing artifacts really
+        // does cost more than the original. That case is why this is a guide.
+        Some(ceiling) if width <= media.video.width && height <= media.video.height => {
+            kbps.min(f64::from(ceiling))
+        }
+        _ => kbps,
+    }
+}
+
+/// The source's video bitrate, falling back to the whole-container figure when the
+/// stream carries none. Video dominates every file this tool accepts, so the container
+/// bitrate is a close enough stand-in.
+fn source_video_bitrate_kbps(media: &InputMedia) -> Option<u32> {
+    media.video.bitrate_kbps.or(media.bitrate_kbps)
+}
+
+/// The frame size the encoder will actually see, mirroring [`scale_filter`]: fit inside
+/// the target canvas, preserve the aspect ratio, never upscale, keep both sides even.
+pub fn output_dimensions(resolution: Resolution, source: &VideoStreamInfo) -> (u32, u32) {
+    let Some((canvas_width, canvas_height)) = resolution.canvas() else {
+        return (source.width, source.height);
+    };
+    let canvas_width = u32::from(canvas_width);
+    let canvas_height = u32::from(canvas_height);
+    if source.width <= canvas_width && source.height <= canvas_height {
+        return (source.width, source.height);
+    }
+    let scale = f64::min(
+        f64::from(canvas_width) / f64::from(source.width),
+        f64::from(canvas_height) / f64::from(source.height),
+    );
+    (
+        round_to_even(f64::from(source.width) * scale),
+        round_to_even(f64::from(source.height) * scale),
+    )
+}
+
+/// `force_divisible_by=2` in the scale filter; encoders reject odd dimensions.
+fn round_to_even(value: f64) -> u32 {
+    let rounded = value.round().max(2.0) as u32;
+    rounded - rounded % 2
+}
+
+/// Formats a byte count the way file managers and ffmpeg report one: SI units, with
+/// the tier chosen so the number stays short enough to sit in a settings row.
+pub fn format_size(bytes: u64) -> String {
+    const KB: f64 = 1_000.0;
+    const MB: f64 = KB * KB;
+    const GB: f64 = MB * KB;
+
+    let bytes = bytes as f64;
+    if bytes < MB {
+        format!("{:.0} KB", (bytes / KB).max(1.0))
+    } else if bytes < GB {
+        format!("{:.1} MB", bytes / MB)
+    } else {
+        format!("{:.2} GB", bytes / GB)
+    }
 }
 
 pub fn suggested_output_path(input: &std::path::Path, container: Container) -> PathBuf {
@@ -604,6 +788,286 @@ mod tests {
         assert!(filter.contains("min(1920,iw)"));
         assert!(filter.contains("min(1080,ih)"));
         assert!(filter.contains("force_divisible_by=2"));
+    }
+
+    fn probed_media() -> InputMedia {
+        InputMedia {
+            path: PathBuf::from("clip.mp4"),
+            duration: Some(Duration::from_secs(10)),
+            video: VideoStreamInfo {
+                codec: "h264".to_owned(),
+                width: 1920,
+                height: 1080,
+                frame_rate: Some(30.0),
+                // High enough that the source ceiling never binds unless a test
+                // deliberately lowers it.
+                bitrate_kbps: Some(100_000),
+            },
+            audio: Some(AudioStreamInfo {
+                codec: "aac".to_owned(),
+                channels: Some(2),
+                sample_rate: Some(48_000),
+            }),
+            format_name: Some("mov,mp4".to_owned()),
+            size_bytes: Some(125_000_000),
+            bitrate_kbps: Some(100_000),
+        }
+    }
+
+    #[test]
+    fn target_bitrate_estimate_follows_the_requested_bitrate() {
+        let draft = DraftConfig {
+            rate_control_mode: RateControlMode::Bitrate,
+            video_bitrate_kbps: 5_000,
+            audio_bitrate_kbps: 192,
+            ..DraftConfig::default()
+        };
+
+        let estimate = estimate_output_size(&draft, &probed_media()).unwrap();
+
+        assert_eq!(estimate.basis, EstimateBasis::Targeted);
+        // (5000 + 192) kbps over 10 s, plus 2% muxing overhead.
+        let expected = (5_192.0 * 1_000.0 * 10.0 * 1.02 / 8.0) as u64;
+        assert_eq!(estimate.bytes, expected);
+        assert_eq!(estimate.label(), "~6.6 MB");
+    }
+
+    #[test]
+    fn doubling_the_bitrate_doubles_the_estimate() {
+        let media = probed_media();
+        let base = DraftConfig {
+            rate_control_mode: RateControlMode::Bitrate,
+            video_bitrate_kbps: 5_000,
+            audio_codec: AudioCodec::None,
+            ..DraftConfig::default()
+        };
+        let doubled = DraftConfig {
+            video_bitrate_kbps: 10_000,
+            ..base.clone()
+        };
+
+        let small = estimate_output_size(&base, &media).unwrap().bytes;
+        let large = estimate_output_size(&doubled, &media).unwrap().bytes;
+
+        assert_eq!(large, small * 2);
+    }
+
+    #[test]
+    fn quality_estimate_is_marked_as_rough() {
+        let draft = DraftConfig {
+            rate_control_mode: RateControlMode::Quality,
+            ..DraftConfig::default()
+        };
+
+        let estimate = estimate_output_size(&draft, &probed_media()).unwrap();
+
+        assert_eq!(estimate.basis, EstimateBasis::Heuristic);
+        assert!(
+            estimate.label().ends_with("(rough)"),
+            "heuristic labels must disclose themselves: {}",
+            estimate.label()
+        );
+    }
+
+    /// The bits-per-pixel table is meant to be recalibrated, so these assertions pin the
+    /// relationships between its rows rather than the values themselves.
+    #[test]
+    fn quality_bits_per_pixel_ordering_holds_across_the_table() {
+        for codec in VideoCodec::ALL {
+            let high = quality_bits_per_pixel(codec, QualityPreset::High);
+            let balanced = quality_bits_per_pixel(codec, QualityPreset::Balanced);
+            let small = quality_bits_per_pixel(codec, QualityPreset::Small);
+            assert!(
+                high > balanced && balanced > small,
+                "{codec} is not ordered"
+            );
+        }
+        for quality in QualityPreset::ALL {
+            // Newer codecs reach the same quality with fewer bits.
+            assert!(
+                quality_bits_per_pixel(VideoCodec::H265, quality)
+                    < quality_bits_per_pixel(VideoCodec::H264, quality)
+            );
+            assert!(
+                quality_bits_per_pixel(VideoCodec::Av1, quality)
+                    < quality_bits_per_pixel(VideoCodec::H265, quality)
+            );
+            // VideoToolbox buys speed with bitrate.
+            assert!(
+                quality_bits_per_pixel(VideoCodec::H264Hw, quality)
+                    > quality_bits_per_pixel(VideoCodec::H264, quality)
+            );
+            assert!(
+                quality_bits_per_pixel(VideoCodec::H265Hw, quality)
+                    > quality_bits_per_pixel(VideoCodec::H265, quality)
+            );
+        }
+    }
+
+    #[test]
+    fn balanced_h264_lands_in_a_plausible_band_for_1080p30() {
+        let draft = DraftConfig {
+            rate_control_mode: RateControlMode::Quality,
+            audio_codec: AudioCodec::None,
+            ..DraftConfig::default()
+        };
+
+        let bytes = estimate_output_size(&draft, &probed_media()).unwrap().bytes;
+        let megabits_per_second = bytes as f64 * 8.0 / 10.0 / 1_000_000.0;
+
+        // x264 CRF 23 at 1080p30 sits around 4-5 Mbps on live-action footage. A wide
+        // band keeps the table tunable while still catching an order-of-magnitude slip.
+        assert!(
+            (2.0..8.0).contains(&megabits_per_second),
+            "implausible 1080p30 estimate: {megabits_per_second} Mbps"
+        );
+    }
+
+    #[test]
+    fn downscaling_shrinks_the_quality_estimate() {
+        let media = probed_media();
+        let source = DraftConfig {
+            rate_control_mode: RateControlMode::Quality,
+            resolution: Resolution::Source,
+            ..DraftConfig::default()
+        };
+        let downscaled = DraftConfig {
+            resolution: Resolution::P480,
+            ..source.clone()
+        };
+
+        assert!(
+            estimate_output_size(&downscaled, &media).unwrap().bytes
+                < estimate_output_size(&source, &media).unwrap().bytes
+        );
+    }
+
+    #[test]
+    fn source_bitrate_caps_the_quality_estimate() {
+        let mut media = probed_media();
+        media.video.bitrate_kbps = Some(800);
+        let draft = DraftConfig {
+            rate_control_mode: RateControlMode::Quality,
+            quality: QualityPreset::High,
+            audio_codec: AudioCodec::None,
+            ..DraftConfig::default()
+        };
+
+        let bytes = estimate_output_size(&draft, &media).unwrap().bytes;
+
+        // The uncapped model would ask for several megabits; the source only ever spent
+        // 800 kbps, so the estimate is pulled down to that ceiling.
+        assert_eq!(bytes, (800.0 * 1_000.0 * 10.0 * 1.02 / 8.0) as u64);
+    }
+
+    #[test]
+    fn upscaling_ignores_the_source_ceiling() {
+        let mut media = probed_media();
+        media.video.width = 640;
+        media.video.height = 360;
+        media.video.bitrate_kbps = Some(800);
+        let draft = DraftConfig {
+            rate_control_mode: RateControlMode::Quality,
+            resolution: Resolution::Source,
+            audio_codec: AudioCodec::None,
+            ..DraftConfig::default()
+        };
+
+        // The scale filter never upscales, so a 640x360 source stays at its own size
+        // and the ceiling still applies.
+        let bytes = estimate_output_size(&draft, &media).unwrap().bytes;
+        assert_eq!(bytes, (800.0 * 1_000.0 * 10.0 * 1.02 / 8.0) as u64);
+    }
+
+    #[test]
+    fn silent_output_drops_the_audio_bitrate() {
+        let media = probed_media();
+        let with_audio = DraftConfig {
+            rate_control_mode: RateControlMode::Bitrate,
+            video_bitrate_kbps: 5_000,
+            audio_bitrate_kbps: 192,
+            ..DraftConfig::default()
+        };
+        let muted = DraftConfig {
+            audio_codec: AudioCodec::None,
+            ..with_audio.clone()
+        };
+
+        let mut silent_source = media.clone();
+        silent_source.audio = None;
+
+        let audible = estimate_output_size(&with_audio, &media).unwrap().bytes;
+        let muted_bytes = estimate_output_size(&muted, &media).unwrap().bytes;
+        let no_track = estimate_output_size(&with_audio, &silent_source)
+            .unwrap()
+            .bytes;
+
+        assert!(muted_bytes < audible);
+        // A source without an audio track cannot gain one, whatever the draft says.
+        assert_eq!(no_track, muted_bytes);
+    }
+
+    #[test]
+    fn estimates_need_a_duration() {
+        let mut media = probed_media();
+        media.duration = None;
+
+        assert!(estimate_output_size(&DraftConfig::default(), &media).is_none());
+
+        media.duration = Some(Duration::ZERO);
+        assert!(estimate_output_size(&DraftConfig::default(), &media).is_none());
+    }
+
+    #[test]
+    fn missing_frame_rate_falls_back_instead_of_failing() {
+        let mut media = probed_media();
+        media.video.frame_rate = None;
+        let draft = DraftConfig {
+            rate_control_mode: RateControlMode::Quality,
+            ..DraftConfig::default()
+        };
+
+        assert!(estimate_output_size(&draft, &media).is_some());
+    }
+
+    #[test]
+    fn output_dimensions_mirror_the_scale_filter() {
+        let source = |width, height| VideoStreamInfo {
+            codec: "h264".to_owned(),
+            width,
+            height,
+            frame_rate: Some(30.0),
+            bitrate_kbps: None,
+        };
+
+        assert_eq!(
+            output_dimensions(Resolution::P1080, &source(3840, 2160)),
+            (1920, 1080)
+        );
+        // Never upscale.
+        assert_eq!(
+            output_dimensions(Resolution::P2160, &source(1280, 720)),
+            (1280, 720)
+        );
+        assert_eq!(
+            output_dimensions(Resolution::Source, &source(3840, 2160)),
+            (3840, 2160)
+        );
+        // Fit the wider axis and keep both sides even.
+        let (width, height) = output_dimensions(Resolution::P1080, &source(3000, 500));
+        assert_eq!((width, height), (1920, 320));
+        let (width, height) = output_dimensions(Resolution::P720, &source(1999, 1001));
+        assert_eq!(width % 2, 0);
+        assert_eq!(height % 2, 0);
+        assert!(width <= 1280 && height <= 720);
+    }
+
+    #[test]
+    fn formats_sizes_in_readable_tiers() {
+        assert_eq!(format_size(0), "1 KB");
+        assert_eq!(format_size(512_000), "512 KB");
+        assert_eq!(format_size(6_619_800), "6.6 MB");
+        assert_eq!(format_size(2_500_000_000), "2.50 GB");
     }
 
     #[test]

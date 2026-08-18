@@ -15,6 +15,8 @@ fftui lets you choose an input and output with native file dialogs, select compa
 - Video quality presets using codec-specific constant-quality values
 - Target video bitrate presets and custom values
 - Audio bitrate presets and custom values
+- Estimated output size, exact in target-bitrate mode and approximate under
+  constant quality
 - Shell-safe command preview before execution
 - Live processed time, percentage, speed, and recent FFmpeg messages
 - Graceful cancellation with automatic temporary-output cleanup

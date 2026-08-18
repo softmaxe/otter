@@ -11,8 +11,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{
     domain::{
         AUDIO_BITRATE_PRESETS, AudioCodec, Container, DraftConfig, InputMedia, QualityPreset,
-        RateControlMode, Resolution, TranscodeConfig, VIDEO_BITRATE_PRESETS, quality_setting,
-        suggested_output_path, supported_audio_codecs, supported_video_codecs,
+        RateControlMode, Resolution, SizeEstimate, TranscodeConfig, VIDEO_BITRATE_PRESETS,
+        estimate_output_size, quality_setting, suggested_output_path, supported_audio_codecs,
+        supported_video_codecs,
     },
     media::probe_media,
     toolchain::Toolchain,
@@ -268,6 +269,12 @@ impl App {
             self.draft.quality,
             quality_setting(self.draft.video_codec, self.draft.quality)
         )
+    }
+
+    /// The predicted size of the file the current draft would produce. `None` until a
+    /// source has been probed, or when that source has no usable duration.
+    pub fn size_estimate(&self) -> Option<SizeEstimate> {
+        estimate_output_size(&self.draft, self.media.as_ref()?)
     }
 
     pub fn request_cancel(&mut self) {

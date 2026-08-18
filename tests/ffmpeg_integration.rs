@@ -10,7 +10,8 @@ use std::{
 
 use fftui::{
     domain::{
-        AudioCodec, Container, DraftConfig, QualityPreset, RateControlMode, Resolution, VideoCodec,
+        AudioCodec, Container, DraftConfig, EstimateBasis, QualityPreset, RateControlMode,
+        Resolution, VideoCodec, estimate_output_size,
     },
     media::probe_media,
     toolchain::Toolchain,
@@ -154,6 +155,82 @@ fn wait_for_finished(event_rx: &Receiver<WorkerEvent>) -> PathBuf {
             }
         }
     }
+}
+
+/// The size estimate is the one claim this project makes about a file that does not
+/// exist yet, so it is worth checking against a real encode rather than against its own
+/// arithmetic. Only the target-bitrate path is asserted: it is the path that promises
+/// accuracy, and unlike the constant-quality model it does not depend on what the
+/// footage looks like.
+#[test]
+fn target_bitrate_estimate_matches_a_real_encode() {
+    let Some(toolchain) = available_toolchain() else {
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let source = directory.path().join("estimate source.mp4");
+    run_ffmpeg(
+        &toolchain.ffmpeg,
+        &[
+            OsStr::new("-hide_banner"),
+            OsStr::new("-loglevel"),
+            OsStr::new("error"),
+            OsStr::new("-y"),
+            OsStr::new("-f"),
+            OsStr::new("lavfi"),
+            OsStr::new("-i"),
+            OsStr::new("testsrc2=size=640x360:rate=30"),
+            OsStr::new("-f"),
+            OsStr::new("lavfi"),
+            OsStr::new("-i"),
+            OsStr::new("sine=frequency=1000:sample_rate=48000"),
+            // Long enough that per-file overhead and the encoder's opening frames stop
+            // dominating; a one-second clip cannot test a bitrate promise.
+            OsStr::new("-t"),
+            OsStr::new("8"),
+            OsStr::new("-c:v"),
+            OsStr::new("libx264"),
+            OsStr::new("-preset"),
+            OsStr::new("ultrafast"),
+            OsStr::new("-pix_fmt"),
+            OsStr::new("yuv420p"),
+            OsStr::new("-c:a"),
+            OsStr::new("aac"),
+            OsStr::new("-shortest"),
+            source.as_os_str(),
+        ],
+    );
+
+    let media = probe_media(&toolchain.ffprobe, &source).expect("source should be probed");
+    let output = directory.path().join("estimated.mp4");
+    let draft = DraftConfig {
+        input: Some(source.clone()),
+        output: Some(output.clone()),
+        resolution: Resolution::Source,
+        rate_control_mode: RateControlMode::Bitrate,
+        video_bitrate_kbps: 1_200,
+        audio_bitrate_kbps: 128,
+        ..DraftConfig::default()
+    };
+    let estimate = estimate_output_size(&draft, &media).expect("probed media should estimate");
+    assert_eq!(estimate.basis, EstimateBasis::Targeted);
+
+    let config = draft
+        .validated(&media)
+        .expect("configuration should be valid");
+    let artifact = OutputArtifact::reserve(output).expect("output should be reserved");
+    let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
+    let (event_tx, event_rx) = mpsc::channel();
+    let _handle = spawn_transcode_worker(spec, artifact, media.duration, event_tx);
+    let produced = wait_for_finished(&event_rx);
+
+    let actual = fs::metadata(&produced).expect("output should exist").len() as f64;
+    let ratio = actual / estimate.bytes as f64;
+    assert!(
+        (0.80..=1.20).contains(&ratio),
+        "target-bitrate estimate drifted: predicted {} bytes, produced {actual} bytes (ratio {ratio:.2})",
+        estimate.bytes
+    );
 }
 
 #[test]
@@ -350,10 +427,5 @@ fn has_app_temporary_directory(directory: &Path) -> bool {
     fs::read_dir(directory)
         .expect("temporary directory should be readable")
         .filter_map(Result::ok)
-        .any(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".fftui-")
-        })
+        .any(|entry| entry.file_name().to_string_lossy().starts_with(".fftui-"))
 }
