@@ -487,28 +487,6 @@ const FALLBACK_FRAME_RATE: f64 = 30.0;
 /// resolution ladder instead of needing a row per resolution.
 const RESOLUTION_FALLOFF_EXPONENT: f64 = 0.25;
 
-/// The bits per pixel [`quality_bits_per_pixel`] reports for the reference encoder and
-/// preset (H.264, Balanced). The content model predicts that one number, and every
-/// other codec and preset is applied to it as a ratio, so changing either moves the
-/// estimate by the full amount the table says it should.
-const REFERENCE_BPP: f64 = 0.075;
-
-/// How much of the constant-quality prediction comes from the source's own bitrate
-/// rather than from the table, as the exponent in a log-space blend of the two.
-///
-/// The table alone is content-blind, and content dominates constant-quality encoding.
-/// Measured across clips ranging from a flat colour field to pure noise, a table-only
-/// estimate that used the source bitrate merely as a ceiling spanned a 33x error, while
-/// the blend below spanned 3x. The weight is high because the source bitrate carries
-/// nearly all of the signal, leaving the table to anchor the answer when the source is
-/// unusual. Keeping it under 1.0 also stops the blend extrapolating violently on inputs
-/// far outside the range it was fitted on.
-const SOURCE_WEIGHT: f64 = 0.88;
-
-/// Companion scale to [`SOURCE_WEIGHT`], fitted alongside it. Below 1.0 because a
-/// re-encode discards detail the source spent bits on.
-const BLEND_SCALE: f64 = 0.54;
-
 /// How large the configured output is expected to be, and how much to trust it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SizeEstimate {
@@ -566,11 +544,21 @@ pub fn estimate_output_size(draft: &DraftConfig, media: &InputMedia) -> Option<S
 /// Bits per pixel per frame each encoder spends at 1080p on typical live-action
 /// content, for the constant-quality settings in [`quality_setting`].
 ///
-/// These are published rules of thumb rather than measurements from this project's own
-/// encodes. Only the ratios between rows really matter: [`content_bitrate_kbps`]
-/// predicts the reference row from the footage itself, and this table converts that
-/// answer to the chosen encoder and preset. Recalibrating the relative cost of a codec
-/// or a preset means editing this table and nothing else.
+/// This table cannot see the footage, and for constant-quality encoding the footage is
+/// the dominant term: two clips from the same drone, measured here, needed 3.4 Mbps and
+/// 44 Mbps for the same settings. Its central value is well placed — those two clips
+/// average within 3% of what it predicts — but individual clips land within roughly a
+/// factor of three either side, which is why the result is labelled rough.
+///
+/// A source's own bitrate looks like the missing content signal and is not one. Camera
+/// originals record at a fixed rate whatever they are pointed at: across the measured
+/// clips, a 1.3x difference in source bitrate accompanied a 13x difference in output.
+/// Weighting the estimate toward it was tried and reverted — it cut the error on
+/// already-compressed inputs but biased camera footage roughly 5x high, and camera
+/// footage is what this tool is pointed at. The source bitrate survives only as a
+/// ceiling.
+///
+/// Recalibrating means editing this table and nothing else.
 fn quality_bits_per_pixel(codec: VideoCodec, quality: QualityPreset) -> f64 {
     match (codec, quality) {
         (VideoCodec::H264, QualityPreset::High) => 0.150,
@@ -581,12 +569,19 @@ fn quality_bits_per_pixel(codec: VideoCodec, quality: QualityPreset) -> f64 {
         (VideoCodec::H264Hw, QualityPreset::High) => 0.230,
         (VideoCodec::H264Hw, QualityPreset::Balanced) => 0.115,
         (VideoCodec::H264Hw, QualityPreset::Small) => 0.058,
-        (VideoCodec::H265, QualityPreset::High) => 0.100,
-        (VideoCodec::H265, QualityPreset::Balanced) => 0.048,
-        (VideoCodec::H265, QualityPreset::Small) => 0.030,
-        (VideoCodec::H265Hw, QualityPreset::High) => 0.145,
-        (VideoCodec::H265Hw, QualityPreset::Balanced) => 0.070,
-        (VideoCodec::H265Hw, QualityPreset::Small) => 0.042,
+        // Measured, not inherited: libx265 at the presets this app picks came in at
+        // 0.27x and 0.28x of libx264 on two 4K clips and 0.37x at 1080p, against the
+        // 0.64x these rows used to claim.
+        (VideoCodec::H265, QualityPreset::High) => 0.064,
+        (VideoCodec::H265, QualityPreset::Balanced) => 0.024,
+        (VideoCodec::H265, QualityPreset::Small) => 0.013,
+        // VideoToolbox HEVC measured no cheaper than VideoToolbox H.264 — 1.67x and
+        // 1.66x of libx264 on the same clip. The rows these replace claimed 0.93x,
+        // which had hardware HEVC beating software H.264 and contradicted the note
+        // above about hardware buying speed with bitrate.
+        (VideoCodec::H265Hw, QualityPreset::High) => 0.235,
+        (VideoCodec::H265Hw, QualityPreset::Balanced) => 0.125,
+        (VideoCodec::H265Hw, QualityPreset::Small) => 0.060,
         (VideoCodec::Av1, QualityPreset::High) => 0.085,
         (VideoCodec::Av1, QualityPreset::Balanced) => 0.042,
         (VideoCodec::Av1, QualityPreset::Small) => 0.022,
@@ -600,58 +595,30 @@ fn quality_video_bitrate_kbps(draft: &DraftConfig, media: &InputMedia) -> f64 {
     let (width, height) = output_dimensions(draft.resolution, &media.video);
     let pixels = f64::from(width) * f64::from(height);
     let frame_rate = media.video.frame_rate.unwrap_or(FALLBACK_FRAME_RATE);
-    let reference = reference_bitrate_kbps(pixels, frame_rate);
+    let kbps = quality_bits_per_pixel(draft.video_codec, draft.quality)
+        * resolution_falloff(pixels)
+        * pixels
+        * frame_rate
+        / 1_000.0;
 
-    // Separating "how expensive is this footage" from "which encoder and preset" is
-    // what lets the source bitrate answer the first question without also drowning out
-    // the second: only the content term is blended, and the preset ratio is then
-    // applied to the result at full strength.
-    content_bitrate_kbps(media, pixels, reference)
-        * quality_bits_per_pixel(draft.video_codec, draft.quality)
-        / REFERENCE_BPP
-}
-
-/// What the reference encoder and preset would spend on this frame size, before any
-/// knowledge of the actual footage.
-fn reference_bitrate_kbps(pixels: f64, frame_rate: f64) -> f64 {
-    REFERENCE_BPP * resolution_falloff(pixels) * pixels * frame_rate / 1_000.0
+    // The source bitrate restated at the output frame size, so a 4K source does not
+    // hand a 480p encode a ceiling four times too generous.
+    let source_pixels = f64::from(media.video.width) * f64::from(media.video.height);
+    let ceiling = source_video_bitrate_kbps(media).map(|kbps| {
+        f64::from(kbps) * (pixels / source_pixels).powf(1.0 - RESOLUTION_FALLOFF_EXPONENT)
+    });
+    match ceiling {
+        // A lossy re-encode practically never needs more bits than the source already
+        // spent. The ceiling rarely binds on camera footage, where the recording
+        // bitrate dwarfs anything a constant-quality encode asks for, but it is what
+        // keeps the estimate sane when the input is an already-compressed download.
+        Some(ceiling) if source_pixels > 0.0 => kbps.min(ceiling),
+        _ => kbps,
+    }
 }
 
 fn resolution_falloff(pixels: f64) -> f64 {
     (pixels / REFERENCE_PIXELS).powf(-RESOLUTION_FALLOFF_EXPONENT)
-}
-
-/// What this particular footage costs at the reference encoder and preset.
-///
-/// How many bits a constant-quality encode needs depends far more on what the footage
-/// looks like than on anything the settings panel can show, and the source bitrate is
-/// the only measurement of that available without encoding something first. It is a
-/// confounded measurement — a high bitrate means complex content, or a high-quality
-/// source, and nothing here distinguishes the two — which is why it is blended with the
-/// table rather than trusted outright, and why the result is labelled rough.
-fn content_bitrate_kbps(media: &InputMedia, output_pixels: f64, reference: f64) -> f64 {
-    // Intra-only mezzanine and camera formats spend their bits on a far flatter curve
-    // than inter-frame codecs, so their bitrate would need a much steeper correction to
-    // mean the same thing. That correction could not be calibrated safely on the
-    // samples available: every exponent that improved the measured clips extrapolated
-    // to absurd bitrates for 4K mezzanine sources. The table is content-blind for these
-    // inputs, but it stays bounded, which is the better failure.
-    let source = source_video_bitrate_kbps(media).filter(|_| !is_intra_only(&media.video.codec));
-    let Some(source_kbps) = source else {
-        return reference;
-    };
-    let source_pixels = f64::from(media.video.width) * f64::from(media.video.height);
-    if source_pixels <= 0.0 {
-        return reference;
-    }
-
-    // Restate the source bitrate at the output frame size, following the same
-    // `pixels ^ (1 - falloff exponent)` shape the table uses, so downscaling to 480p
-    // does not drag a 4K source's bitrate into the estimate.
-    let source_at_output = f64::from(source_kbps)
-        * (output_pixels / source_pixels).powf(1.0 - RESOLUTION_FALLOFF_EXPONENT);
-
-    BLEND_SCALE * reference.powf(1.0 - SOURCE_WEIGHT) * source_at_output.powf(SOURCE_WEIGHT)
 }
 
 /// The source's video bitrate, falling back to the whole-container figure when the
@@ -659,34 +626,6 @@ fn content_bitrate_kbps(media: &InputMedia, output_pixels: f64, reference: f64) 
 /// bitrate is a close enough stand-in.
 fn source_video_bitrate_kbps(media: &InputMedia) -> Option<u32> {
     media.video.bitrate_kbps.or(media.bitrate_kbps)
-}
-
-/// Whether a codec stores every frame independently, under the names ffprobe reports.
-fn is_intra_only(codec: &str) -> bool {
-    matches!(
-        codec,
-        "prores"
-            | "dnxhd"
-            | "mjpeg"
-            | "mjpegb"
-            | "rawvideo"
-            | "v210"
-            | "v308"
-            | "v410"
-            | "ffv1"
-            | "huffyuv"
-            | "ffvhuff"
-            | "utvideo"
-            | "cfhd"
-            | "jpeg2000"
-            | "dvvideo"
-            | "hap"
-            | "qtrle"
-            | "png"
-            | "tiff"
-            | "dpx"
-            | "exr"
-    )
 }
 
 /// The frame size the encoder will actually see, mirroring [`scale_filter`]: fit inside
@@ -973,10 +912,9 @@ mod tests {
                 quality_bits_per_pixel(VideoCodec::H265, quality)
                     < quality_bits_per_pixel(VideoCodec::H264, quality)
             );
-            assert!(
-                quality_bits_per_pixel(VideoCodec::Av1, quality)
-                    < quality_bits_per_pixel(VideoCodec::H265, quality)
-            );
+            // AV1 is not asserted against H.265: which of the two lands lower is
+            // decided by the CRF values this app picks for each, not by the codecs,
+            // and measurement puts libx265 below SVT-AV1 at those values.
             // VideoToolbox buys speed with bitrate.
             assert!(
                 quality_bits_per_pixel(VideoCodec::H264Hw, quality)
@@ -1028,35 +966,11 @@ mod tests {
     }
 
     #[test]
-    fn the_reference_constant_matches_the_table_it_stands_for() {
-        assert_eq!(
-            REFERENCE_BPP,
-            quality_bits_per_pixel(VideoCodec::H264, QualityPreset::Balanced)
-        );
-    }
-
-    #[test]
-    fn quality_estimate_tracks_source_complexity() {
-        let draft = DraftConfig {
-            rate_control_mode: RateControlMode::Quality,
-            audio_codec: AudioCodec::None,
-            ..DraftConfig::default()
-        };
-        let estimate = |kbps| {
-            let mut media = probed_media();
-            media.video.bitrate_kbps = Some(kbps);
-            estimate_output_size(&draft, &media).unwrap().bytes
-        };
-
-        // The whole point of the blend: identical settings on harder footage predict a
-        // larger file, which a table-only model cannot express.
-        assert!(estimate(1_000) < estimate(8_000));
-        assert!(estimate(8_000) < estimate(60_000));
-    }
-
-    #[test]
     fn codec_and_preset_move_the_estimate_by_the_table_ratio() {
-        let media = probed_media();
+        let mut media = probed_media();
+        // Lift the source ceiling clear of every preset, so this measures the table.
+        media.video.bitrate_kbps = Some(200_000);
+        media.bitrate_kbps = Some(200_000);
         let draft = |codec, quality| DraftConfig {
             rate_control_mode: RateControlMode::Quality,
             audio_codec: AudioCodec::None,
@@ -1071,8 +985,7 @@ mod tests {
         };
 
         let balanced = bytes(VideoCodec::H264, QualityPreset::Balanced);
-        // Blending content must not dilute the preset and codec ratios; both still move
-        // the estimate by exactly what the table says.
+        // Codec and preset move the estimate by exactly what the table says.
         let expected = |codec, quality| {
             quality_bits_per_pixel(codec, quality)
                 / quality_bits_per_pixel(VideoCodec::H264, QualityPreset::Balanced)
@@ -1090,31 +1003,6 @@ mod tests {
                 "{codec} {quality}: moved {ratio:.3}x, table says {want:.3}x"
             );
         }
-    }
-
-    #[test]
-    fn intra_only_sources_ignore_their_own_bitrate() {
-        let draft = DraftConfig {
-            rate_control_mode: RateControlMode::Quality,
-            audio_codec: AudioCodec::None,
-            ..DraftConfig::default()
-        };
-        let mut prores = probed_media();
-        prores.video.codec = "prores".to_owned();
-        // ProRes spends this whatever the footage shows, so feeding it to the blend
-        // would predict a wildly oversized H.264 file.
-        prores.video.bitrate_kbps = Some(220_000);
-        prores.bitrate_kbps = Some(220_000);
-
-        let mut unknown = probed_media();
-        unknown.video.bitrate_kbps = None;
-        unknown.bitrate_kbps = None;
-
-        assert_eq!(
-            estimate_output_size(&draft, &prores).unwrap().bytes,
-            estimate_output_size(&draft, &unknown).unwrap().bytes,
-            "an intra-only source should fall back to the table, as an unmeasured one does"
-        );
     }
 
     #[test]
@@ -1139,55 +1027,118 @@ mod tests {
         assert!(bytes(Resolution::P480) < bytes(Resolution::P1080) / 2.0);
     }
 
-    /// Pins the blend against real encodes rather than against its own arithmetic.
+    /// Pins the codec and preset rows against ratios measured on real footage.
     ///
-    /// Each pair is a measured 720p30 clip: the source's video bitrate, and the bitrate
-    /// libx264 actually produced from it at CRF 23. The clips span a flat colour field
-    /// to pure noise, and two of them repeat one scene encoded at CRF 14, 20, 26 and 32
-    /// so the source's own quality varies independently of its content. A table-only
-    /// model spans 33x on this set; the tolerance below is what the blend achieves.
+    /// Ratios are worth testing where absolute values are not: content largely cancels
+    /// when the same clip is encoded twice, so these numbers are far better determined
+    /// than the table's overall level. Every figure below is an encode of the same
+    /// aerial clip at 1080p, relative to H.264 Balanced.
     #[test]
-    fn the_blend_stays_calibrated_against_measured_encodes() {
-        const MEASURED: [(u32, f64); 11] = [
-            (11, 11.0),
-            (529, 544.0),
-            (4_060, 3_067.0),
-            (7_152, 5_113.0),
-            (98_294, 83_135.0),
-            (6_167, 3_064.0),
-            (2_076, 2_485.0),
-            (894, 1_514.0),
-            (12_336, 5_134.0),
-            (3_452, 3_814.0),
-            (1_078, 1_423.0),
+    fn codec_rows_match_ratios_measured_on_real_footage() {
+        const MEASURED: [(VideoCodec, QualityPreset, f64); 6] = [
+            (VideoCodec::H265, QualityPreset::High, 0.98),
+            (VideoCodec::H265, QualityPreset::Balanced, 0.37),
+            (VideoCodec::H265, QualityPreset::Small, 0.20),
+            (VideoCodec::Av1, QualityPreset::Balanced, 0.59),
+            (VideoCodec::H264Hw, QualityPreset::Balanced, 1.66),
+            (VideoCodec::H265Hw, QualityPreset::Balanced, 1.67),
         ];
 
-        let draft = DraftConfig {
-            rate_control_mode: RateControlMode::Quality,
-            quality: QualityPreset::Balanced,
-            video_codec: VideoCodec::H264,
-            audio_codec: AudioCodec::None,
-            resolution: Resolution::Source,
-            ..DraftConfig::default()
-        };
-        let mut ratios = Vec::new();
-        for (source_kbps, actual_kbps) in MEASURED {
+        let baseline = quality_bits_per_pixel(VideoCodec::H264, QualityPreset::Balanced);
+        for (codec, quality, measured) in MEASURED {
+            let table = quality_bits_per_pixel(codec, quality) / baseline;
+            let drift = (table / measured).max(measured / table);
+            // Ratios hold across clips far better than levels do, but not perfectly:
+            // libx265 measured 0.27x at 4K against 0.37x at 1080p on the same footage.
+            assert!(
+                drift < 1.6,
+                "{codec} {quality}: table says {table:.2}x, real footage said {measured:.2}x"
+            );
+        }
+    }
+
+    /// Pins the constant-quality model against real encodes rather than against its own
+    /// arithmetic, and records what it actually costs.
+    ///
+    /// Each row is a measured clip: source bitrate and frame size, the settings used,
+    /// and the bitrate libx264 actually produced. The drone rows are camera originals;
+    /// the rest are synthesised clips spanning a flat colour field to pure noise, both
+    /// re-encoded from constant-quality sources and from fixed-bitrate ones. The
+    /// tolerances below are deliberately wide because they are honest: a model that
+    /// cannot see the footage cannot do better, and tightening them would only mean
+    /// tuning the table to this corpus.
+    #[test]
+    fn the_quality_model_stays_calibrated_against_measured_encodes() {
+        // (source kbps, source w, source h, output resolution, fps, measured kbps)
+        const MEASURED: [(u32, u32, u32, Resolution, f64, f64); 18] = [
+            // Camera originals: two clips from one drone, 13x apart in what they need.
+            (100_624, 3840, 2160, Resolution::Source, 23.976, 3_365.0),
+            (100_624, 3840, 2160, Resolution::P1080, 23.976, 1_034.0),
+            (130_610, 3840, 2160, Resolution::Source, 29.97, 44_055.0),
+            // Fixed-bitrate sources: near-identical bitrates, unrelated outputs.
+            (19, 1920, 1080, Resolution::Source, 30.0, 19.0),
+            (18_905, 1920, 1080, Resolution::Source, 30.0, 1_361.0),
+            (29_739, 1920, 1080, Resolution::Source, 30.0, 6_293.0),
+            (69_168, 1920, 1080, Resolution::Source, 30.0, 9_536.0),
+            // Constant-quality sources across content and across source quality.
+            (11, 1280, 720, Resolution::Source, 30.0, 11.0),
+            (529, 1280, 720, Resolution::Source, 30.0, 544.0),
+            (4_060, 1280, 720, Resolution::Source, 30.0, 3_067.0),
+            (7_152, 1280, 720, Resolution::Source, 30.0, 5_113.0),
+            (98_294, 1280, 720, Resolution::Source, 30.0, 83_135.0),
+            (6_167, 1280, 720, Resolution::Source, 30.0, 3_064.0),
+            (2_076, 1280, 720, Resolution::Source, 30.0, 2_485.0),
+            (894, 1280, 720, Resolution::Source, 30.0, 1_514.0),
+            (12_336, 1280, 720, Resolution::Source, 30.0, 5_134.0),
+            (3_452, 1280, 720, Resolution::Source, 30.0, 3_814.0),
+            (1_078, 1280, 720, Resolution::Source, 30.0, 1_423.0),
+        ];
+
+        let mut drone = Vec::new();
+        let mut all = Vec::new();
+        for (index, (source_kbps, width, height, resolution, fps, actual_kbps)) in
+            MEASURED.into_iter().enumerate()
+        {
             let mut media = probed_media();
-            media.video.width = 1280;
-            media.video.height = 720;
+            media.video.width = width;
+            media.video.height = height;
+            media.video.frame_rate = Some(fps);
             media.video.bitrate_kbps = Some(source_kbps);
+            media.bitrate_kbps = Some(source_kbps);
+            let draft = DraftConfig {
+                rate_control_mode: RateControlMode::Quality,
+                quality: QualityPreset::Balanced,
+                video_codec: VideoCodec::H264,
+                audio_codec: AudioCodec::None,
+                resolution,
+                ..DraftConfig::default()
+            };
             let predicted = estimate_output_size(&draft, &media).unwrap().bytes as f64;
-            // Put the measurement through the same overhead and duration the estimate
+            // Put the measurement through the same duration and overhead the estimate
             // used, so the ratio compares models rather than bookkeeping.
             let expected = actual_kbps * 1_000.0 * 10.0 * 1.02 / 8.0;
-            ratios.push(predicted / expected);
+            let ratio = predicted / expected;
+            all.push(ratio);
+            if index < 3 {
+                drone.push(ratio);
+            }
         }
 
-        let low = ratios.iter().copied().fold(f64::INFINITY, f64::min);
-        let high = ratios.iter().copied().fold(0.0_f64, f64::max);
+        // Real footage is the case this tool is pointed at, and no clip may be off by
+        // more than about a factor of four in either direction.
+        for ratio in &drone {
+            assert!(
+                (0.25..=4.0).contains(ratio),
+                "a drone clip drifted to {ratio:.2}x"
+            );
+        }
+        let low = all.iter().copied().fold(f64::INFINITY, f64::min);
+        let high = all.iter().copied().fold(0.0_f64, f64::max);
+        // Pure noise is in this corpus deliberately, and nothing content-blind survives
+        // it gracefully; this bound exists to catch a regression, not to claim accuracy.
         assert!(
-            high / low < 3.5,
-            "blend drifted: ratios span {:.1}x ({low:.2} .. {high:.2})",
+            high / low < 150.0,
+            "the corpus spread widened to {:.0}x ({low:.2} .. {high:.2})",
             high / low
         );
     }
