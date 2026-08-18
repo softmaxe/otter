@@ -15,6 +15,8 @@ fftui lets you choose an input and output with native file dialogs, select compa
 - Video quality presets using codec-specific constant-quality values
 - Target video bitrate presets and custom values
 - Audio bitrate presets and custom values
+- Estimated output size, exact in target-bitrate mode and approximate under
+  constant quality
 - Shell-safe command preview before execution
 - Live processed time, percentage, speed, and recent FFmpeg messages
 - Graceful cancellation with automatic temporary-output cleanup
@@ -55,6 +57,16 @@ cargo run
 ```
 
 The application must be run directly in an interactive terminal. Redirected stdin or stdout is not supported.
+
+`cargo build --release` produces a binary for the host architecture only. To build one that runs on both Apple silicon and Intel Macs, install the two standard libraries once and run the universal build script:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+./scripts/build-universal.sh
+./target/universal-apple-darwin/release/fftui
+```
+
+The script builds each architecture and merges them with `lipo`.
 
 ## Workflow
 

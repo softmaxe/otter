@@ -16,3 +16,14 @@ serde_json = "1"
 tempfile = "3"
 thiserror = "2"
 unicode-width = "0.2"
+
+[profile.release]
+# One codegen unit and full LTO let the optimiser see across crate boundaries. Both
+# cost compile time and buy runtime speed, which is the right trade for a binary that
+# is built rarely and run often.
+codegen-units = 1
+lto = "fat"
+strip = "symbols"
+# Deliberately not `panic = "abort"`. `App::drop` cancels a running FFmpeg child, and
+# aborting would skip it, orphaning the process and its temporary output directory.
+panic = "unwind"
