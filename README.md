@@ -58,6 +58,16 @@ cargo run
 
 The application must be run directly in an interactive terminal. Redirected stdin or stdout is not supported.
 
+`cargo build --release` produces a binary for the host architecture only. To build one that runs on both Apple silicon and Intel Macs, install the two standard libraries once and run the universal build script:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+./scripts/build-universal.sh
+./target/universal-apple-darwin/release/fftui
+```
+
+The script builds each architecture and merges them with `lipo`.
+
 ## Workflow
 
 1. Press `i` and choose an input media file.
