@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fftui::{
+use otter::{
     domain::{
         AudioCodec, Container, DraftConfig, EstimateBasis, InputMedia, OutputTarget, QualityPreset,
         RateControlMode, Resolution, TranscodeConfig, VideoCodec, estimate_output_size,
@@ -640,5 +640,5 @@ fn has_app_temporary_directory(directory: &Path) -> bool {
     fs::read_dir(directory)
         .expect("temporary directory should be readable")
         .filter_map(Result::ok)
-        .any(|entry| entry.file_name().to_string_lossy().starts_with(".fftui-"))
+        .any(|entry| entry.file_name().to_string_lossy().starts_with(".otter-"))
 }

@@ -67,7 +67,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let ffmpeg_version = short_version(&app.toolchain.ffmpeg_version);
     let title = Line::from(vec![
         Span::styled(
-            " FFTUI ",
+            " OTTER ",
             Style::default()
                 .fg(BG)
                 .bg(ACCENT)
@@ -908,7 +908,7 @@ mod tests {
     fn renders_configure_and_help_in_english() {
         let mut app = test_app();
         let configured = render_text(&app, 100, 30);
-        assert!(configured.contains("FFTUI"));
+        assert!(configured.contains("OTTER"));
         assert!(configured.contains("No input selected"));
         assert!(configured.contains("Rate control"));
         assert!(configured.contains("Balanced (CRF 23)"));
@@ -1123,8 +1123,8 @@ mod tests {
     #[test]
     fn renders_without_panicking_in_small_terminals() {
         let mut app = test_app();
-        assert!(render_text(&app, 80, 24).contains("FFTUI"));
-        assert!(render_text(&app, 60, 20).contains("FFTUI"));
+        assert!(render_text(&app, 80, 24).contains("OTTER"));
+        assert!(render_text(&app, 60, 20).contains("OTTER"));
 
         // A queue must not push the workspace off a terminal that has no spare rows.
         let sources: Vec<_> = (0..40)
@@ -1136,7 +1136,7 @@ mod tests {
             .collect();
         with_inputs(&mut app, &borrowed);
         assert!(render_text(&app, 80, 24).contains("40 files selected"));
-        assert!(render_text(&app, 60, 20).contains("FFTUI"));
+        assert!(render_text(&app, 60, 20).contains("OTTER"));
         assert!(render_text(&app, 120, 50).contains("more"));
     }
 }

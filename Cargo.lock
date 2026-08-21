@@ -475,22 +475,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "fftui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossterm",
- "nix",
- "ratatui",
- "rfd",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "unicode-width 0.2.0",
-]
-
-[[package]]
 name = "find-msvc-tools"
 version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -967,6 +951,22 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "otter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossterm",
+ "nix",
+ "ratatui",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

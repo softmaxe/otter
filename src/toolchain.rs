@@ -34,9 +34,9 @@ pub struct Toolchain {
 
 impl Toolchain {
     pub fn discover() -> Result<Self, ToolError> {
-        let ffmpeg = resolve_tool("FFTUI_FFMPEG", "ffmpeg").ok_or(ToolError::NotFound("ffmpeg"))?;
+        let ffmpeg = resolve_tool("OTTER_FFMPEG", "ffmpeg").ok_or(ToolError::NotFound("ffmpeg"))?;
         let ffprobe =
-            resolve_tool("FFTUI_FFPROBE", "ffprobe").ok_or(ToolError::NotFound("ffprobe"))?;
+            resolve_tool("OTTER_FFPROBE", "ffprobe").ok_or(ToolError::NotFound("ffprobe"))?;
         let ffmpeg_version = version_line(&ffmpeg)?;
         // The line itself is unused; running it is what proves ffprobe is executable
         // before the first file is read.
@@ -159,6 +159,6 @@ mod tests {
 
     #[test]
     fn nonexistent_override_falls_back_instead_of_panicking() {
-        assert!(resolve_tool("FFTUI_TEST_MISSING", "definitely-not-a-real-binary").is_none());
+        assert!(resolve_tool("OTTER_TEST_MISSING", "definitely-not-a-real-binary").is_none());
     }
 }

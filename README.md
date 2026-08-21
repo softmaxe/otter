@@ -1,8 +1,8 @@
-# fftui
+# otter
 
 A macOS-first terminal interface for configuring and running FFmpeg transcodes — one file or a whole batch — without writing FFmpeg commands by hand.
 
-fftui lets you choose one or many inputs with native file dialogs, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
+otter lets you choose one or many inputs with native file dialogs, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
 
 ## Features
 
@@ -38,11 +38,11 @@ Install the required tools with Homebrew:
 brew install rust ffmpeg
 ```
 
-fftui searches `PATH`, `/opt/homebrew/bin`, and `/usr/local/bin`. Custom binary locations can be selected with environment variables:
+otter searches `PATH`, `/opt/homebrew/bin`, and `/usr/local/bin`. Custom binary locations can be selected with environment variables:
 
 ```sh
-FFTUI_FFMPEG=/custom/path/ffmpeg \
-FFTUI_FFPROBE=/custom/path/ffprobe \
+OTTER_FFMPEG=/custom/path/ffmpeg \
+OTTER_FFPROBE=/custom/path/ffprobe \
 cargo run --release
 ```
 
@@ -50,7 +50,7 @@ cargo run --release
 
 ```sh
 cargo build --release
-./target/release/fftui
+./target/release/otter
 ```
 
 For development:
@@ -192,13 +192,13 @@ Select Source to keep the original dimensions.
 
 ## Output safety
 
-fftui never executes the preview through a shell. Program arguments remain separate values, so spaces, quotes, Unicode, and shell metacharacters in paths are not interpreted as shell syntax.
+otter never executes the preview through a shell. Program arguments remain separate values, so spaces, quotes, Unicode, and shell metacharacters in paths are not interpreted as shell syntax.
 
 The application also:
 
 - rejects an output path that matches any selected input;
 - refuses to overwrite an existing final output;
-- writes into an app-owned `.fftui-*` directory beside the destination; and
+- writes into an app-owned `.otter-*` directory beside the destination; and
 - atomically renames the completed temporary file to the final path only after FFmpeg succeeds.
 
 Failed and cancelled jobs remove the app-owned temporary directory. Cancellation sends FFmpeg `SIGINT` first and force-stops it only if it does not exit within approximately three seconds.

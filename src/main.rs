@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyEventKind};
-use fftui::{
+use otter::{
     app::{App, UiCommand},
     dialog::{self, CHILD_FLAG, DialogRequest},
     terminal::{TerminalSession, install_panic_hook},
@@ -28,7 +28,7 @@ fn main() -> Result<()> {
     }
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        bail!("fftui requires an interactive terminal.");
+        bail!("otter requires an interactive terminal.");
     }
 
     let toolchain = Toolchain::discover().context("FFmpeg tool discovery failed")?;

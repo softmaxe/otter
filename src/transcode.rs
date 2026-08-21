@@ -45,7 +45,7 @@ impl OutputArtifact {
             .parent()
             .filter(|path| path.is_dir())
             .ok_or(TranscodeError::InvalidOutputDirectory)?;
-        let directory = Builder::new().prefix(".fftui-").tempdir_in(parent)?;
+        let directory = Builder::new().prefix(".otter-").tempdir_in(parent)?;
         let extension = final_path
             .extension()
             .and_then(OsStr::to_str)
