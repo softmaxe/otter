@@ -21,16 +21,11 @@ use std::{
 };
 
 use rfd::FileDialog;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Hidden first argument that turns this executable into a one-shot dialog helper.
 pub const CHILD_FLAG: &str = "--file-dialog";
-
-const OPEN_MODE: &str = "open";
-const SAVE_MODE: &str = "save";
-const FOLDER_MODE: &str = "folder";
-const DIRECTORY_FLAG: &str = "--directory";
-const FILE_NAME_FLAG: &str = "--file-name";
 
 /// Separates the helper's paths on stdout. A path may contain anything except a NUL
 /// byte, so nothing else is safe to split on.
@@ -39,7 +34,7 @@ const PATH_SEPARATOR: u8 = 0;
 const INPUT_FILTER: &str = "Media files";
 const INPUT_EXTENSIONS: &[&str] = &["mp4", "mkv", "webm", "mov", "avi", "m4v", "ts"];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DialogRequest {
     /// One panel that accepts any number of media files.
     OpenInputs,
@@ -65,33 +60,13 @@ pub enum DialogError {
 
 impl DialogRequest {
     /// Arguments that make a fresh process of this binary show exactly this dialog.
-    pub fn to_args(&self) -> Vec<OsString> {
-        let mut args = vec![OsString::from(CHILD_FLAG)];
-        match self {
-            Self::OpenInputs => args.push(OsString::from(OPEN_MODE)),
-            Self::SaveOutput {
-                directory,
-                file_name,
-            } => {
-                args.push(OsString::from(SAVE_MODE));
-                if let Some(directory) = directory {
-                    args.push(OsString::from(DIRECTORY_FLAG));
-                    args.push(directory.as_os_str().to_owned());
-                }
-                if let Some(file_name) = file_name {
-                    args.push(OsString::from(FILE_NAME_FLAG));
-                    args.push(OsString::from(file_name));
-                }
-            }
-            Self::ChooseOutputFolder { directory } => {
-                args.push(OsString::from(FOLDER_MODE));
-                if let Some(directory) = directory {
-                    args.push(OsString::from(DIRECTORY_FLAG));
-                    args.push(directory.as_os_str().to_owned());
-                }
-            }
-        }
-        args
+    ///
+    /// ponytail: the request travels as JSON, so a starting directory whose name is
+    /// not valid UTF-8 is rejected instead of passed through. APFS filenames are
+    /// UTF-8; swap in a byte-preserving encoding if that stops holding.
+    pub fn to_args(&self) -> Result<Vec<OsString>, DialogError> {
+        let request = serde_json::to_string(self).map_err(|_| DialogError::BadArguments)?;
+        Ok(vec![OsString::from(CHILD_FLAG), OsString::from(request)])
     }
 
     /// Inverse of [`DialogRequest::to_args`], starting at the [`CHILD_FLAG`].
@@ -103,37 +78,12 @@ impl DialogRequest {
         if args.next().as_deref() != Some(OsStr::new(CHILD_FLAG)) {
             return Err(DialogError::BadArguments);
         }
-        let mode = args.next().ok_or(DialogError::BadArguments)?;
-        if mode == OsStr::new(OPEN_MODE) {
-            return match args.next() {
-                None => Ok(Self::OpenInputs),
-                Some(_) => Err(DialogError::BadArguments),
-            };
-        }
-        let folder = mode == OsStr::new(FOLDER_MODE);
-        if !folder && mode != OsStr::new(SAVE_MODE) {
+        let request = args.next().ok_or(DialogError::BadArguments)?;
+        if args.next().is_some() {
             return Err(DialogError::BadArguments);
         }
-
-        let mut directory = None;
-        let mut file_name = None;
-        while let Some(flag) = args.next() {
-            let value = args.next().ok_or(DialogError::BadArguments)?;
-            if flag == OsStr::new(DIRECTORY_FLAG) {
-                directory = Some(PathBuf::from(value));
-            } else if flag == OsStr::new(FILE_NAME_FLAG) && !folder {
-                file_name = Some(value.into_string().map_err(|_| DialogError::BadArguments)?);
-            } else {
-                return Err(DialogError::BadArguments);
-            }
-        }
-        if folder {
-            return Ok(Self::ChooseOutputFolder { directory });
-        }
-        Ok(Self::SaveOutput {
-            directory,
-            file_name,
-        })
+        let request = request.to_str().ok_or(DialogError::BadArguments)?;
+        serde_json::from_str(request).map_err(|_| DialogError::BadArguments)
     }
 }
 
@@ -144,7 +94,7 @@ impl DialogRequest {
 pub fn prompt(request: &DialogRequest) -> Result<Vec<PathBuf>, DialogError> {
     let program = env::current_exe().map_err(DialogError::CurrentExe)?;
     let output = Command::new(program)
-        .args(request.to_args())
+        .args(request.to_args()?)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -225,7 +175,8 @@ mod tests {
     use super::*;
 
     fn round_trip(request: &DialogRequest) -> DialogRequest {
-        DialogRequest::parse_args(request.to_args()).expect("arguments should round-trip")
+        let args = request.to_args().expect("a request should encode");
+        DialogRequest::parse_args(args).expect("arguments should round-trip")
     }
 
     #[test]
@@ -257,27 +208,27 @@ mod tests {
 
     #[test]
     fn rejects_arguments_that_are_not_a_dialog_request() {
+        let valid = DialogRequest::OpenInputs
+            .to_args()
+            .expect("a request should encode")
+            .pop()
+            .expect("the encoded request is the last argument");
         for args in [
             vec![],
             vec![OsString::from("--help")],
             vec![OsString::from(CHILD_FLAG)],
+            // Not a request at all.
             vec![OsString::from(CHILD_FLAG), OsString::from("browse")],
+            // A request the helper does not have a variant for.
             vec![
                 OsString::from(CHILD_FLAG),
-                OsString::from(OPEN_MODE),
+                OsString::from(r#"{"DeleteEverything":null}"#),
+            ],
+            // Nothing may follow the request.
+            vec![
+                OsString::from(CHILD_FLAG),
+                valid,
                 OsString::from("/etc/passwd"),
-            ],
-            vec![
-                OsString::from(CHILD_FLAG),
-                OsString::from(SAVE_MODE),
-                OsString::from(DIRECTORY_FLAG),
-            ],
-            // A folder has no file name to preset.
-            vec![
-                OsString::from(CHILD_FLAG),
-                OsString::from(FOLDER_MODE),
-                OsString::from(FILE_NAME_FLAG),
-                OsString::from("clip.mp4"),
             ],
         ] {
             assert!(DialogRequest::parse_args(args).is_err());

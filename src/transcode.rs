@@ -27,7 +27,6 @@ pub struct CommandSpec {
     pub program: PathBuf,
     pub args: Vec<OsString>,
     pub temporary_output: PathBuf,
-    pub final_output: PathBuf,
 }
 
 #[derive(Debug)]
@@ -62,10 +61,6 @@ impl OutputArtifact {
 
     pub fn temporary_path(&self) -> &Path {
         &self.temporary_path
-    }
-
-    pub fn final_path(&self) -> &Path {
-        &self.final_path
     }
 
     fn persist(self) -> Result<PathBuf, TranscodeError> {
@@ -140,7 +135,6 @@ pub fn build_command_spec(
         program: ffmpeg.to_owned(),
         args,
         temporary_output: artifact.temporary_path().to_owned(),
-        final_output: artifact.final_path().to_owned(),
     }
 }
 
@@ -505,13 +499,11 @@ fn run_job(
 mod tests {
     use super::*;
     use crate::domain::{
-        AudioStreamInfo, Container, InputMedia, QualityPreset, Resolution, TranscodeConfig,
-        VideoStreamInfo,
+        Container, InputMedia, QualityPreset, Resolution, TranscodeConfig, VideoStreamInfo,
     };
 
-    fn media(path: PathBuf) -> InputMedia {
+    fn media() -> InputMedia {
         InputMedia {
-            path,
             duration: Some(Duration::from_secs(10)),
             video: VideoStreamInfo {
                 codec: "h264".to_owned(),
@@ -520,13 +512,7 @@ mod tests {
                 frame_rate: Some(30.0),
                 bitrate_kbps: Some(8_000),
             },
-            audio: Some(AudioStreamInfo {
-                codec: "aac".to_owned(),
-                channels: Some(2),
-                sample_rate: Some(48_000),
-            }),
-            format_name: Some("mov,mp4".to_owned()),
-            size_bytes: Some(10_000_000),
+            audio: Some("aac".to_owned()),
             bitrate_kbps: Some(8_192),
         }
     }
@@ -558,7 +544,7 @@ mod tests {
                 output.clone(),
                 VideoRateControl::Quality(QualityPreset::Balanced),
             ),
-            &media(input.clone()),
+            &media(),
             &artifact,
         );
         let quality_args = quality
@@ -572,7 +558,7 @@ mod tests {
         let bitrate = build_command_spec(
             Path::new("/usr/bin/ffmpeg"),
             &config(input.clone(), output, VideoRateControl::Bitrate(5_000)),
-            &media(input),
+            &media(),
             &artifact,
         );
         let bitrate_args = bitrate
@@ -611,7 +597,7 @@ mod tests {
             let spec = build_command_spec(
                 Path::new("/usr/bin/ffmpeg"),
                 &transcode_config,
-                &media(input.clone()),
+                &media(),
                 &artifact,
             );
             let args = spec
@@ -650,7 +636,7 @@ mod tests {
         let spec = build_command_spec(
             Path::new("/usr/bin/ffmpeg"),
             &transcode_config,
-            &media(input.clone()),
+            &media(),
             &artifact,
         );
         let args = spec
@@ -683,7 +669,7 @@ mod tests {
         let software = build_command_spec(
             Path::new("/usr/bin/ffmpeg"),
             &transcode_config,
-            &media(input),
+            &media(),
             &artifact,
         );
         let software_args = software
@@ -705,7 +691,7 @@ mod tests {
         let spec = build_command_spec(
             Path::new("ffmpeg"),
             &config(input.clone(), output, VideoRateControl::Bitrate(2_500)),
-            &media(input.clone()),
+            &media(),
             &artifact,
         );
         assert_eq!(

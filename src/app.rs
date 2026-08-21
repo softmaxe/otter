@@ -177,17 +177,12 @@ impl App {
         }
     }
 
-    /// Replaces the selection with `paths`.
-    pub fn select_inputs(&mut self, paths: Vec<PathBuf>) {
-        self.apply_selection(paths);
-    }
-
     /// Appends `paths` to the selection, which is how files from several folders end
     /// up in one queue. Paths already selected are ignored.
     pub fn add_inputs(&mut self, paths: Vec<PathBuf>) {
         let mut inputs = self.draft.inputs.clone();
         inputs.extend(paths);
-        self.apply_selection(inputs);
+        self.select_inputs(inputs);
     }
 
     /// Reads every selected input again, keeping the rest of the configuration.
@@ -419,7 +414,8 @@ impl App {
         }
     }
 
-    fn apply_selection(&mut self, paths: Vec<PathBuf>) {
+    /// Replaces the selection with `paths`, ignoring duplicates.
+    pub fn select_inputs(&mut self, paths: Vec<PathBuf>) {
         let mut inputs: Vec<PathBuf> = Vec::with_capacity(paths.len());
         for path in paths {
             if !inputs.contains(&path) {
@@ -803,11 +799,7 @@ impl App {
     }
 
     fn field_enabled(&self, field: ConfigField) -> bool {
-        match field {
-            ConfigField::RateValue => true,
-            ConfigField::AudioBitrate => self.audio_bitrate_enabled(),
-            _ => true,
-        }
+        field != ConfigField::AudioBitrate || self.audio_bitrate_enabled()
     }
 
     /// True while any queued source carries audio the encoder would have to write.
@@ -1024,30 +1016,25 @@ fn cycle<T: Copy + PartialEq>(values: &[T], current: T, direction: i32) -> T {
     values[next]
 }
 
+/// Steps through the presets from the one nearest the current value, so a bitrate
+/// typed by hand still lands somewhere sensible. An exact match has distance zero, so
+/// it always wins.
 fn cycle_numeric(values: &[u32], current: u32, direction: i32) -> u32 {
-    let index = values
+    let nearest = values
         .iter()
-        .position(|value| *value == current)
-        .unwrap_or_else(|| {
-            values
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, value)| value.abs_diff(current))
-                .map(|(index, _)| index)
-                .unwrap_or(0)
-        });
-    let next = (index as i32 + direction).rem_euclid(values.len() as i32) as usize;
-    values[next]
+        .copied()
+        .min_by_key(|value| value.abs_diff(current))
+        .unwrap_or(current);
+    cycle(values, nearest, direction)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{AudioStreamInfo, VideoStreamInfo};
+    use crate::domain::VideoStreamInfo;
 
-    fn media(path: &str) -> InputMedia {
+    fn media() -> InputMedia {
         InputMedia {
-            path: PathBuf::from(path),
             duration: Some(Duration::from_secs(10)),
             video: VideoStreamInfo {
                 codec: "h264".to_owned(),
@@ -1056,13 +1043,7 @@ mod tests {
                 frame_rate: Some(30.0),
                 bitrate_kbps: Some(8_000),
             },
-            audio: Some(AudioStreamInfo {
-                codec: "aac".to_owned(),
-                channels: Some(2),
-                sample_rate: Some(48_000),
-            }),
-            format_name: Some("mov,mp4".to_owned()),
-            size_bytes: Some(10_000_000),
+            audio: Some("aac".to_owned()),
             bitrate_kbps: Some(8_192),
         }
     }
@@ -1149,7 +1130,7 @@ mod tests {
         app.draft.inputs = vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp4")];
         app.job = JobState::Probing;
 
-        app.handle_probe_result(PathBuf::from("a.mp4"), Ok(media("a.mp4")));
+        app.handle_probe_result(PathBuf::from("a.mp4"), Ok(media()));
         assert!(matches!(app.job, JobState::Probing));
 
         app.handle_probe_result(PathBuf::from("b.mp4"), Err("unreadable".to_owned()));
@@ -1168,12 +1149,10 @@ mod tests {
         let mut app = App::new(Toolchain::test_fixture());
         app.draft.inputs = vec![PathBuf::from("a.mp4"), PathBuf::from("b.mp4")];
         app.draft.rate_control_mode = RateControlMode::Bitrate;
-        app.probes
-            .insert(PathBuf::from("a.mp4"), Ok(media("a.mp4")));
+        app.probes.insert(PathBuf::from("a.mp4"), Ok(media()));
         let single = app.size_estimate().expect("one probed source estimates");
 
-        app.probes
-            .insert(PathBuf::from("b.mp4"), Ok(media("b.mp4")));
+        app.probes.insert(PathBuf::from("b.mp4"), Ok(media()));
         let both = app.size_estimate().expect("two probed sources estimate");
 
         assert_eq!(both.bytes, single.bytes * 2);

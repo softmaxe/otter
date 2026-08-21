@@ -10,13 +10,14 @@ use std::{
 
 use fftui::{
     domain::{
-        AudioCodec, Container, DraftConfig, EstimateBasis, OutputTarget, QualityPreset,
-        RateControlMode, Resolution, VideoCodec, estimate_output_size,
+        AudioCodec, Container, DraftConfig, EstimateBasis, InputMedia, OutputTarget, QualityPreset,
+        RateControlMode, Resolution, TranscodeConfig, VideoCodec, estimate_output_size,
     },
     media::probe_media,
     toolchain::Toolchain,
     transcode::{
-        OutputArtifact, QueuedJob, WorkerEvent, build_command_spec, spawn_transcode_worker,
+        OutputArtifact, QueuedJob, TranscodeHandle, WorkerEvent, build_command_spec,
+        spawn_transcode_worker,
     },
 };
 use tempfile::TempDir;
@@ -40,16 +41,70 @@ fn available_toolchain() -> Option<Toolchain> {
     }
 }
 
-fn run_ffmpeg(ffmpeg: &Path, args: &[&OsStr]) {
-    let output = Command::new(ffmpeg)
+/// Runs one fixture command with `output` appended as its destination. Splitting the
+/// flags from the path keeps the call sites readable as the command line they are.
+fn run_ffmpeg(ffmpeg: &Path, args: &[&str], output: &Path) {
+    let result = Command::new(ffmpeg)
         .args(args)
+        .arg(output)
         .output()
         .expect("FFmpeg fixture command should start");
     assert!(
-        output.status.success(),
+        result.status.success(),
         "FFmpeg fixture command failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&result.stderr)
     );
+}
+
+/// Reserves the output, builds the command and starts a queue of one. The handle is
+/// returned because dropping it would leave the caller unable to cancel the run.
+fn start_job(
+    toolchain: &Toolchain,
+    config: &TranscodeConfig,
+    media: &InputMedia,
+) -> (TranscodeHandle, Receiver<WorkerEvent>) {
+    let artifact =
+        OutputArtifact::reserve(config.output.clone()).expect("output should be reserved");
+    let spec = build_command_spec(&toolchain.ffmpeg, config, media, &artifact);
+    let (event_tx, event_rx) = mpsc::channel();
+    let handle = spawn_transcode_worker(
+        vec![QueuedJob {
+            spec,
+            artifact,
+            duration: media.duration,
+        }],
+        event_tx,
+    );
+    (handle, event_rx)
+}
+
+fn queued_jobs(
+    toolchain: &Toolchain,
+    configs: &[TranscodeConfig],
+    media: &[InputMedia],
+) -> Vec<QueuedJob> {
+    configs
+        .iter()
+        .zip(media)
+        .map(|(config, media)| {
+            let artifact =
+                OutputArtifact::reserve(config.output.clone()).expect("output should be reserved");
+            QueuedJob {
+                spec: build_command_spec(&toolchain.ffmpeg, config, media, &artifact),
+                artifact,
+                duration: media.duration,
+            }
+        })
+        .collect()
+}
+
+/// The temporary directory is removed on a background drop, so give it a moment.
+fn assert_cleaned_up(directory: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while has_app_temporary_directory(directory) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!has_app_temporary_directory(directory));
 }
 
 fn generate_media(toolchain: &Toolchain, directory: &TempDir) -> (PathBuf, PathBuf) {
@@ -57,59 +112,84 @@ fn generate_media(toolchain: &Toolchain, directory: &TempDir) -> (PathBuf, PathB
     run_ffmpeg(
         &toolchain.ffmpeg,
         &[
-            OsStr::new("-hide_banner"),
-            OsStr::new("-loglevel"),
-            OsStr::new("error"),
-            OsStr::new("-y"),
-            OsStr::new("-f"),
-            OsStr::new("lavfi"),
-            OsStr::new("-i"),
-            OsStr::new("testsrc2=size=320x180:rate=24"),
-            OsStr::new("-f"),
-            OsStr::new("lavfi"),
-            OsStr::new("-i"),
-            OsStr::new("sine=frequency=1000:sample_rate=48000"),
-            OsStr::new("-t"),
-            OsStr::new("1"),
-            OsStr::new("-c:v"),
-            OsStr::new("libx264"),
-            OsStr::new("-preset"),
-            OsStr::new("ultrafast"),
-            OsStr::new("-pix_fmt"),
-            OsStr::new("yuv420p"),
-            OsStr::new("-c:a"),
-            OsStr::new("aac"),
-            OsStr::new("-shortest"),
-            with_audio.as_os_str(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:sample_rate=48000",
+            "-t",
+            "1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
         ],
+        &with_audio,
     );
 
     let without_audio = directory.path().join("silent source.mp4");
     run_ffmpeg(
         &toolchain.ffmpeg,
         &[
-            OsStr::new("-hide_banner"),
-            OsStr::new("-loglevel"),
-            OsStr::new("error"),
-            OsStr::new("-y"),
-            OsStr::new("-f"),
-            OsStr::new("lavfi"),
-            OsStr::new("-i"),
-            OsStr::new("color=c=blue:size=160x90:rate=24"),
-            OsStr::new("-t"),
-            OsStr::new("0.5"),
-            OsStr::new("-c:v"),
-            OsStr::new("libx264"),
-            OsStr::new("-preset"),
-            OsStr::new("ultrafast"),
-            OsStr::new("-pix_fmt"),
-            OsStr::new("yuv420p"),
-            OsStr::new("-an"),
-            without_audio.as_os_str(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:size=160x90:rate=24",
+            "-t",
+            "0.5",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
         ],
+        &without_audio,
     );
 
     (with_audio, without_audio)
+}
+
+/// A clip long enough that a cancellation lands while FFmpeg is still encoding.
+fn generate_long_source(toolchain: &Toolchain, output: &Path) {
+    run_ffmpeg(
+        &toolchain.ffmpeg,
+        &[
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=1280x720:rate=30",
+            "-t",
+            "8",
+            "-c:v",
+            "mpeg4",
+            "-q:v",
+            "8",
+            "-an",
+        ],
+        output,
+    );
 }
 
 fn transcode(
@@ -134,17 +214,7 @@ fn transcode(
     let config = draft
         .validated_for(input, &media)
         .expect("configuration should be valid");
-    let artifact = OutputArtifact::reserve(output).expect("output should be reserved");
-    let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
-    let (event_tx, event_rx) = mpsc::channel();
-    let _handle = spawn_transcode_worker(
-        vec![QueuedJob {
-            spec,
-            artifact,
-            duration: media.duration,
-        }],
-        event_tx,
-    );
+    let (_handle, event_rx) = start_job(toolchain, &config, &media);
     wait_for_finished(&event_rx)
 }
 
@@ -183,33 +253,33 @@ fn target_bitrate_estimate_matches_a_real_encode() {
     run_ffmpeg(
         &toolchain.ffmpeg,
         &[
-            OsStr::new("-hide_banner"),
-            OsStr::new("-loglevel"),
-            OsStr::new("error"),
-            OsStr::new("-y"),
-            OsStr::new("-f"),
-            OsStr::new("lavfi"),
-            OsStr::new("-i"),
-            OsStr::new("testsrc2=size=640x360:rate=30"),
-            OsStr::new("-f"),
-            OsStr::new("lavfi"),
-            OsStr::new("-i"),
-            OsStr::new("sine=frequency=1000:sample_rate=48000"),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=1000:sample_rate=48000",
             // Long enough that per-file overhead and the encoder's opening frames stop
             // dominating; a one-second clip cannot test a bitrate promise.
-            OsStr::new("-t"),
-            OsStr::new("8"),
-            OsStr::new("-c:v"),
-            OsStr::new("libx264"),
-            OsStr::new("-preset"),
-            OsStr::new("ultrafast"),
-            OsStr::new("-pix_fmt"),
-            OsStr::new("yuv420p"),
-            OsStr::new("-c:a"),
-            OsStr::new("aac"),
-            OsStr::new("-shortest"),
-            source.as_os_str(),
+            "-t",
+            "8",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
         ],
+        &source,
     );
 
     let media = probe_media(&toolchain.ffprobe, &source).expect("source should be probed");
@@ -229,17 +299,7 @@ fn target_bitrate_estimate_matches_a_real_encode() {
     let config = draft
         .validated_for(&source, &media)
         .expect("configuration should be valid");
-    let artifact = OutputArtifact::reserve(output).expect("output should be reserved");
-    let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
-    let (event_tx, event_rx) = mpsc::channel();
-    let _handle = spawn_transcode_worker(
-        vec![QueuedJob {
-            spec,
-            artifact,
-            duration: media.duration,
-        }],
-        event_tx,
-    );
+    let (_handle, event_rx) = start_job(&toolchain, &config, &media);
     let produced = wait_for_finished(&event_rx);
 
     let actual = fs::metadata(&produced).expect("output should exist").len() as f64;
@@ -265,10 +325,7 @@ fn probes_inputs_and_transcodes_mp4_rate_modes_and_mov_output() {
         (320, 180)
     );
     assert_eq!(audio_media.video.codec, "h264");
-    assert_eq!(
-        audio_media.audio.as_ref().map(|audio| audio.codec.as_str()),
-        Some("aac")
-    );
+    assert_eq!(audio_media.audio.as_deref(), Some("aac"));
 
     let silent_media =
         probe_media(&toolchain.ffprobe, &without_audio).expect("silent media should be probed");
@@ -306,10 +363,7 @@ fn probes_inputs_and_transcodes_mp4_rate_modes_and_mov_output() {
         let result = probe_media(&toolchain.ffprobe, &output).expect("output should be probed");
         assert_eq!(result.video.codec, "h264");
         assert_eq!((result.video.width, result.video.height), (320, 180));
-        assert_eq!(
-            result.audio.as_ref().map(|audio| audio.codec.as_str()),
-            Some("aac")
-        );
+        assert_eq!(result.audio.as_deref(), Some("aac"));
     }
 }
 
@@ -347,26 +401,13 @@ fn videotoolbox_encoders_produce_playable_output() {
         let config = draft
             .validated_for(&with_audio, &media)
             .expect("hardware configuration should be valid");
-        let artifact = OutputArtifact::reserve(output).expect("output should be reserved");
-        let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
-        let (event_tx, event_rx) = mpsc::channel();
-        let _handle = spawn_transcode_worker(
-            vec![QueuedJob {
-                spec,
-                artifact,
-                duration: media.duration,
-            }],
-            event_tx,
-        );
+        let (_handle, event_rx) = start_job(&toolchain, &config, &media);
 
         let output = wait_for_finished(&event_rx);
         let result = probe_media(&toolchain.ffprobe, &output).expect("output should be probed");
         assert_eq!(result.video.codec, expected);
         assert_eq!((result.video.width, result.video.height), (320, 180));
-        assert_eq!(
-            result.audio.as_ref().map(|audio| audio.codec.as_str()),
-            Some("aac")
-        );
+        assert_eq!(result.audio.as_deref(), Some("aac"));
     }
 }
 
@@ -393,19 +434,16 @@ fn transcodes_a_queue_of_several_files_into_one_folder() {
         audio_bitrate_kbps: 96,
         ..DraftConfig::default()
     };
-    let sources: Vec<_> = draft
+    let media: Vec<_> = draft
         .inputs
         .iter()
-        .map(|input| {
-            (
-                input.as_path(),
-                probe_media(&toolchain.ffprobe, input).expect("input should be probed"),
-            )
-        })
+        .map(|input| probe_media(&toolchain.ffprobe, input).expect("input should be probed"))
         .collect();
-    let borrowed: Vec<_> = sources
+    let borrowed: Vec<_> = draft
+        .inputs
         .iter()
-        .map(|(input, media)| (*input, media))
+        .map(PathBuf::as_path)
+        .zip(&media)
         .collect();
     let configs = draft
         .validated_queue(&borrowed)
@@ -421,22 +459,8 @@ fn transcodes_a_queue_of_several_files_into_one_folder() {
         ]
     );
 
-    let jobs: Vec<_> = configs
-        .iter()
-        .zip(&sources)
-        .map(|(config, (_, media))| {
-            let artifact =
-                OutputArtifact::reserve(config.output.clone()).expect("output should be reserved");
-            let spec = build_command_spec(&toolchain.ffmpeg, config, media, &artifact);
-            QueuedJob {
-                spec,
-                artifact,
-                duration: media.duration,
-            }
-        })
-        .collect();
     let (event_tx, event_rx) = mpsc::channel();
-    let _handle = spawn_transcode_worker(jobs, event_tx);
+    let _handle = spawn_transcode_worker(queued_jobs(&toolchain, &configs, &media), event_tx);
 
     let mut finished = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -495,27 +519,7 @@ fn cancelling_a_queue_leaves_the_files_behind_it_untouched() {
     let mut inputs = Vec::new();
     for name in ["long one.mp4", "long two.mp4"] {
         let input = directory.path().join(name);
-        run_ffmpeg(
-            &toolchain.ffmpeg,
-            &[
-                OsStr::new("-hide_banner"),
-                OsStr::new("-loglevel"),
-                OsStr::new("error"),
-                OsStr::new("-y"),
-                OsStr::new("-f"),
-                OsStr::new("lavfi"),
-                OsStr::new("-i"),
-                OsStr::new("testsrc2=size=1280x720:rate=30"),
-                OsStr::new("-t"),
-                OsStr::new("8"),
-                OsStr::new("-c:v"),
-                OsStr::new("mpeg4"),
-                OsStr::new("-q:v"),
-                OsStr::new("8"),
-                OsStr::new("-an"),
-                input.as_os_str(),
-            ],
-        );
+        generate_long_source(&toolchain, &input);
         inputs.push(input);
     }
     let exports = directory.path().join("exports");
@@ -539,22 +543,8 @@ fn cancelling_a_queue_leaves_the_files_behind_it_untouched() {
     let configs = draft
         .validated_queue(&borrowed)
         .expect("the queue should be valid");
-    let jobs: Vec<_> = configs
-        .iter()
-        .zip(&media)
-        .map(|(config, media)| {
-            let artifact =
-                OutputArtifact::reserve(config.output.clone()).expect("output should be reserved");
-            let spec = build_command_spec(&toolchain.ffmpeg, config, media, &artifact);
-            QueuedJob {
-                spec,
-                artifact,
-                duration: media.duration,
-            }
-        })
-        .collect();
     let (event_tx, event_rx) = mpsc::channel();
-    let handle = spawn_transcode_worker(jobs, event_tx);
+    let handle = spawn_transcode_worker(queued_jobs(&toolchain, &configs, &media), event_tx);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut started = 0;
@@ -590,11 +580,7 @@ fn cancelling_a_queue_leaves_the_files_behind_it_untouched() {
     for config in &configs {
         assert!(!config.output.exists());
     }
-    let cleanup_deadline = Instant::now() + Duration::from_secs(2);
-    while has_app_temporary_directory(&exports) && Instant::now() < cleanup_deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!has_app_temporary_directory(&exports));
+    assert_cleaned_up(&exports);
 }
 
 #[test]
@@ -604,27 +590,7 @@ fn cancellation_removes_final_and_temporary_outputs() {
     };
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let input = directory.path().join("long source.mp4");
-    run_ffmpeg(
-        &toolchain.ffmpeg,
-        &[
-            OsStr::new("-hide_banner"),
-            OsStr::new("-loglevel"),
-            OsStr::new("error"),
-            OsStr::new("-y"),
-            OsStr::new("-f"),
-            OsStr::new("lavfi"),
-            OsStr::new("-i"),
-            OsStr::new("testsrc2=size=1280x720:rate=30"),
-            OsStr::new("-t"),
-            OsStr::new("8"),
-            OsStr::new("-c:v"),
-            OsStr::new("mpeg4"),
-            OsStr::new("-q:v"),
-            OsStr::new("8"),
-            OsStr::new("-an"),
-            input.as_os_str(),
-        ],
-    );
+    generate_long_source(&toolchain, &input);
 
     let media = probe_media(&toolchain.ffprobe, &input).expect("input should be probed");
     let output = directory.path().join("cancelled.mp4");
@@ -643,17 +609,7 @@ fn cancellation_removes_final_and_temporary_outputs() {
     let config = draft
         .validated_for(&input, &media)
         .expect("configuration should be valid");
-    let artifact = OutputArtifact::reserve(output.clone()).expect("output should be reserved");
-    let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
-    let (event_tx, event_rx) = mpsc::channel();
-    let handle = spawn_transcode_worker(
-        vec![QueuedJob {
-            spec,
-            artifact,
-            duration: media.duration,
-        }],
-        event_tx,
-    );
+    let (handle, event_rx) = start_job(&toolchain, &config, &media);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -677,11 +633,7 @@ fn cancellation_removes_final_and_temporary_outputs() {
     }
 
     assert!(!output.exists());
-    let cleanup_deadline = Instant::now() + Duration::from_secs(2);
-    while has_app_temporary_directory(directory.path()) && Instant::now() < cleanup_deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    assert!(!has_app_temporary_directory(directory.path()));
+    assert_cleaned_up(directory.path());
 }
 
 fn has_app_temporary_directory(directory: &Path) -> bool {
