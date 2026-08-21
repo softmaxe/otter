@@ -1,4 +1,9 @@
-use std::{fmt, path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    fmt,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use thiserror::Error;
 
@@ -220,10 +225,41 @@ pub enum VideoRateControl {
     Bitrate(u32),
 }
 
+/// Where a queue writes its results.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputTarget {
+    /// One explicit destination file. Only meaningful for a single input.
+    File(PathBuf),
+    /// A folder that receives one derived file per input.
+    Directory(PathBuf),
+}
+
+impl OutputTarget {
+    /// The destination this input is written to under the given container.
+    pub fn resolve(&self, input: &Path, container: Container) -> PathBuf {
+        match self {
+            Self::File(path) => path.clone(),
+            Self::Directory(directory) => directory.join(suggested_output_name(input, container)),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::File(path) | Self::Directory(path) => path,
+        }
+    }
+
+    pub const fn is_directory(&self) -> bool {
+        matches!(self, Self::Directory(_))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DraftConfig {
-    pub input: Option<PathBuf>,
-    pub output: Option<PathBuf>,
+    /// Every queued source, in the order it will be converted. One entry is the
+    /// ordinary single-file case; the settings below apply to all of them.
+    pub inputs: Vec<PathBuf>,
+    pub output: Option<OutputTarget>,
     pub container: Container,
     pub video_codec: VideoCodec,
     pub audio_codec: AudioCodec,
@@ -237,7 +273,7 @@ pub struct DraftConfig {
 impl Default for DraftConfig {
     fn default() -> Self {
         Self {
-            input: None,
+            inputs: Vec::new(),
             output: None,
             container: Container::Mp4,
             video_codec: VideoCodec::H264,
@@ -252,6 +288,15 @@ impl Default for DraftConfig {
 }
 
 impl DraftConfig {
+    /// The queued source, when the selection holds exactly one. Several parts of the
+    /// interface stay file-shaped in that case instead of talking about a queue.
+    pub fn single_input(&self) -> Option<&Path> {
+        match self.inputs.as_slice() {
+            [input] => Some(input),
+            _ => None,
+        }
+    }
+
     pub fn normalize_for_container(&mut self) {
         if !supported_video_codecs(self.container).contains(&self.video_codec) {
             self.video_codec = default_video_codec(self.container);
@@ -259,21 +304,35 @@ impl DraftConfig {
         if !supported_audio_codecs(self.container).contains(&self.audio_codec) {
             self.audio_codec = default_audio_codec(self.container);
         }
-        if let Some(output) = self.output.as_mut() {
-            output.set_extension(self.container.extension());
+        // A directory target derives every name from the container, so only an
+        // explicit file needs its extension rewritten.
+        if let Some(OutputTarget::File(path)) = self.output.as_mut() {
+            path.set_extension(self.container.extension());
         }
     }
 
-    pub fn validated(&self, media: &InputMedia) -> Result<TranscodeConfig, ValidationError> {
-        let input = self.input.clone().ok_or(ValidationError::MissingInput)?;
-        let output = self.output.clone().ok_or(ValidationError::MissingOutput)?;
+    /// The destination this input would be written to under the current settings.
+    pub fn output_path_for(&self, input: &Path) -> Option<PathBuf> {
+        Some(self.output.as_ref()?.resolve(input, self.container))
+    }
+
+    /// Validates the shared settings against one queued source.
+    pub fn validated_for(
+        &self,
+        input: &Path,
+        media: &InputMedia,
+    ) -> Result<TranscodeConfig, ValidationError> {
+        let target = self.output.as_ref().ok_or(ValidationError::MissingOutput)?;
+        let output = target.resolve(input, self.container);
         if !input.exists() {
             return Err(ValidationError::InputMissing);
         }
         if output.exists() {
             return Err(ValidationError::OutputExists);
         }
-        if input == output {
+        // A queued source must survive until its own turn, so an output may not land
+        // on any input in the selection, not just on this one.
+        if self.inputs.iter().any(|queued| queued == &output) {
             return Err(ValidationError::SameInputAndOutput);
         }
         let parent = output
@@ -303,7 +362,7 @@ impl DraftConfig {
         };
 
         Ok(TranscodeConfig {
-            input,
+            input: input.to_owned(),
             output,
             container: self.container,
             video_codec: self.video_codec,
@@ -316,6 +375,48 @@ impl DraftConfig {
             video_rate_control,
             audio_bitrate_kbps: self.audio_bitrate_kbps,
         })
+    }
+
+    /// Validates the whole selection and returns the queue it would run.
+    ///
+    /// `sources` must carry the probed media for every entry in [`DraftConfig::inputs`],
+    /// in the same order.
+    pub fn validated_queue(
+        &self,
+        sources: &[(&Path, &InputMedia)],
+    ) -> Result<Vec<TranscodeConfig>, QueueValidationError> {
+        if self.inputs.is_empty() {
+            return Err(QueueValidationError::selection(
+                ValidationError::MissingInput,
+            ));
+        }
+        let target = self
+            .output
+            .as_ref()
+            .ok_or_else(|| QueueValidationError::selection(ValidationError::MissingOutput))?;
+        // Several inputs cannot share one explicit file name, so the target has to be
+        // a folder that each name is derived in.
+        if self.inputs.len() > 1 && !target.is_directory() {
+            return Err(QueueValidationError::selection(
+                ValidationError::MissingOutputDirectory,
+            ));
+        }
+
+        let mut configs = Vec::with_capacity(sources.len());
+        let mut claimed = HashSet::with_capacity(sources.len());
+        for (input, media) in sources {
+            let config = self
+                .validated_for(input, media)
+                .map_err(|error| QueueValidationError::at(input, error))?;
+            if !claimed.insert(config.output.clone()) {
+                return Err(QueueValidationError::at(
+                    input,
+                    ValidationError::DuplicateOutput,
+                ));
+            }
+            configs.push(config);
+        }
+        Ok(configs)
     }
 }
 
@@ -364,10 +465,14 @@ pub struct AudioStreamInfo {
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationError {
-    #[error("Select an input file.")]
+    #[error("Select at least one input file.")]
     MissingInput,
-    #[error("Select an output file.")]
+    #[error("Select an output destination.")]
     MissingOutput,
+    #[error("Several inputs need an output folder. Press o to choose one.")]
+    MissingOutputDirectory,
+    #[error("Two inputs would be written to the same output file.")]
+    DuplicateOutput,
     #[error("The input file no longer exists.")]
     InputMissing,
     #[error("The output file already exists. Choose a new file name.")]
@@ -382,6 +487,44 @@ pub enum ValidationError {
     InvalidVideoBitrate,
     #[error("Audio bitrate must be between 32 and 512 kbps.")]
     InvalidAudioBitrate,
+}
+
+/// A validation failure, together with the queued input it belongs to.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub struct QueueValidationError {
+    /// The input at fault, or `None` when the problem concerns the whole selection.
+    pub input: Option<PathBuf>,
+    pub error: ValidationError,
+}
+
+impl QueueValidationError {
+    pub fn selection(error: ValidationError) -> Self {
+        Self { input: None, error }
+    }
+
+    pub fn at(input: &Path, error: ValidationError) -> Self {
+        Self {
+            input: Some(input.to_owned()),
+            error,
+        }
+    }
+}
+
+impl fmt::Display for QueueValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.input {
+            Some(input) => write!(f, "{}: {}", file_label(input), self.error),
+            None => self.error.fmt(f),
+        }
+    }
+}
+
+/// The shortest name that still identifies a path to the user: a selection is read by
+/// file name, and full paths do not fit a list row.
+pub fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 pub const fn supported_video_codecs(container: Container) -> &'static [VideoCodec] {
@@ -541,6 +684,33 @@ pub fn estimate_output_size(draft: &DraftConfig, media: &InputMedia) -> Option<S
     })
 }
 
+/// Predicts the combined size of a whole queue.
+///
+/// A source the model cannot predict — one whose duration ffprobe could not read —
+/// leaves the total short, so its presence downgrades the result to a rough figure
+/// instead of quietly under-reporting it. `None` when nothing could be predicted.
+pub fn estimate_queue_size<'a>(
+    draft: &DraftConfig,
+    sources: impl IntoIterator<Item = &'a InputMedia>,
+) -> Option<SizeEstimate> {
+    let mut bytes = 0u64;
+    let mut basis = EstimateBasis::Targeted;
+    let mut predicted = 0usize;
+    for media in sources {
+        match estimate_output_size(draft, media) {
+            Some(estimate) => {
+                bytes = bytes.saturating_add(estimate.bytes);
+                predicted += 1;
+                if estimate.basis == EstimateBasis::Heuristic {
+                    basis = EstimateBasis::Heuristic;
+                }
+            }
+            None => basis = EstimateBasis::Heuristic,
+        }
+    }
+    (predicted > 0).then_some(SizeEstimate { bytes, basis })
+}
+
 /// Bits per pixel per frame each encoder spends at 1080p on typical live-action
 /// content, for the constant-quality settings in [`quality_setting`].
 ///
@@ -672,18 +842,160 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
-pub fn suggested_output_path(input: &std::path::Path, container: Container) -> PathBuf {
-    let parent = input.parent().unwrap_or_else(|| std::path::Path::new("."));
+/// The file name a converted source is given, next to it or inside a chosen folder.
+pub fn suggested_output_name(input: &Path, container: Container) -> String {
     let stem = input
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("output");
-    parent.join(format!("{stem}.transcoded.{}", container.extension()))
+    format!("{stem}.transcoded.{}", container.extension())
+}
+
+pub fn suggested_output_path(input: &Path, container: Container) -> PathBuf {
+    let parent = input.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(suggested_output_name(input, container))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queue_media() -> InputMedia {
+        InputMedia {
+            path: PathBuf::from("clip.mp4"),
+            duration: Some(Duration::from_secs(10)),
+            video: VideoStreamInfo {
+                codec: "h264".to_owned(),
+                width: 1920,
+                height: 1080,
+                frame_rate: Some(30.0),
+                bitrate_kbps: Some(8_000),
+            },
+            audio: None,
+            format_name: Some("mov,mp4".to_owned()),
+            size_bytes: Some(10_000_000),
+            bitrate_kbps: Some(8_000),
+        }
+    }
+
+    /// A folder target names every output after its own source, in the container the
+    /// settings ask for.
+    #[test]
+    fn a_folder_target_derives_one_output_per_input() {
+        let draft = DraftConfig {
+            inputs: vec![
+                PathBuf::from("/media/one.mov"),
+                PathBuf::from("/archive/two.mkv"),
+            ],
+            output: Some(OutputTarget::Directory(PathBuf::from("/exports"))),
+            container: Container::Matroska,
+            ..DraftConfig::default()
+        };
+
+        assert_eq!(
+            draft.output_path_for(Path::new("/media/one.mov")),
+            Some(PathBuf::from("/exports/one.transcoded.mkv"))
+        );
+        // Sources from different folders keep their own names in the destination.
+        assert_eq!(
+            draft.output_path_for(Path::new("/archive/two.mkv")),
+            Some(PathBuf::from("/exports/two.transcoded.mkv"))
+        );
+    }
+
+    /// Two sources whose names collide in one folder would silently overwrite each
+    /// other, so the queue is refused before anything runs.
+    #[test]
+    fn a_queue_refuses_two_inputs_that_share_an_output_name() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let first = directory.path().join("a").join("clip.mov");
+        let second = directory.path().join("b").join("clip.mov");
+        for input in [&first, &second] {
+            std::fs::create_dir_all(input.parent().unwrap()).unwrap();
+            std::fs::write(input, b"test").unwrap();
+        }
+        let draft = DraftConfig {
+            inputs: vec![first.clone(), second.clone()],
+            output: Some(OutputTarget::Directory(directory.path().to_owned())),
+            ..DraftConfig::default()
+        };
+        let media = queue_media();
+
+        let error = draft
+            .validated_queue(&[(first.as_path(), &media), (second.as_path(), &media)])
+            .expect_err("colliding outputs should be refused");
+
+        assert_eq!(error.error, ValidationError::DuplicateOutput);
+        assert_eq!(error.input.as_deref(), Some(second.as_path()));
+        assert!(error.to_string().starts_with("clip.mov: "));
+    }
+
+    /// Several inputs cannot share one explicit file name.
+    #[test]
+    fn a_queue_of_several_inputs_needs_a_folder() {
+        let draft = DraftConfig {
+            inputs: vec![PathBuf::from("/media/a.mov"), PathBuf::from("/media/b.mov")],
+            output: Some(OutputTarget::File(PathBuf::from("/exports/only.mp4"))),
+            ..DraftConfig::default()
+        };
+
+        let error = draft
+            .validated_queue(&[])
+            .expect_err("one file name cannot receive two inputs");
+
+        assert_eq!(error.error, ValidationError::MissingOutputDirectory);
+        assert_eq!(error.input, None);
+    }
+
+    /// A converted file must not land on a source the queue has not reached yet. An
+    /// output that is already on disk is caught earlier; this is the case where the
+    /// clash only exists inside the selection.
+    #[test]
+    fn an_output_may_not_land_on_another_queued_input() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let first = directory.path().join("clip.mov");
+        let second = directory.path().join("clip.transcoded.mp4");
+        std::fs::write(&first, b"test").unwrap();
+        let draft = DraftConfig {
+            inputs: vec![first.clone(), second.clone()],
+            output: Some(OutputTarget::Directory(directory.path().to_owned())),
+            ..DraftConfig::default()
+        };
+
+        assert_eq!(
+            draft.validated_for(&first, &queue_media()).unwrap_err(),
+            ValidationError::SameInputAndOutput
+        );
+    }
+
+    /// A source the model cannot predict must not quietly shrink the total.
+    #[test]
+    fn the_queue_estimate_marks_an_unpredictable_source() {
+        let draft = DraftConfig {
+            rate_control_mode: RateControlMode::Bitrate,
+            video_bitrate_kbps: 5_000,
+            ..DraftConfig::default()
+        };
+        let media = queue_media();
+        let unknown = InputMedia {
+            duration: None,
+            ..queue_media()
+        };
+
+        let one = estimate_queue_size(&draft, [&media]).expect("a probed source estimates");
+        assert_eq!(one.basis, EstimateBasis::Targeted);
+
+        let two = estimate_queue_size(&draft, [&media, &media]).expect("two sources estimate");
+        assert_eq!(two.bytes, one.bytes * 2);
+
+        let partial =
+            estimate_queue_size(&draft, [&media, &unknown]).expect("the known source estimates");
+        assert_eq!(partial.bytes, one.bytes);
+        assert_eq!(partial.basis, EstimateBasis::Heuristic);
+
+        assert!(estimate_queue_size(&draft, [&unknown]).is_none());
+        assert!(estimate_queue_size(&draft, []).is_none());
+    }
 
     #[test]
     fn normalizes_incompatible_webm_settings() {
@@ -691,7 +1003,7 @@ mod tests {
             container: Container::WebM,
             video_codec: VideoCodec::H264,
             audio_codec: AudioCodec::Aac,
-            output: Some(PathBuf::from("movie.mp4")),
+            output: Some(OutputTarget::File(PathBuf::from("movie.mp4"))),
             ..DraftConfig::default()
         };
 
@@ -699,7 +1011,10 @@ mod tests {
 
         assert_eq!(draft.video_codec, VideoCodec::Vp9);
         assert_eq!(draft.audio_codec, AudioCodec::Opus);
-        assert_eq!(draft.output, Some(PathBuf::from("movie.webm")));
+        assert_eq!(
+            draft.output,
+            Some(OutputTarget::File(PathBuf::from("movie.webm")))
+        );
     }
 
     #[test]
@@ -708,7 +1023,7 @@ mod tests {
             container: Container::Mov,
             video_codec: VideoCodec::Vp9,
             audio_codec: AudioCodec::Opus,
-            output: Some(PathBuf::from("movie.webm")),
+            output: Some(OutputTarget::File(PathBuf::from("movie.webm"))),
             ..DraftConfig::default()
         };
 
@@ -716,7 +1031,10 @@ mod tests {
 
         assert_eq!(draft.video_codec, VideoCodec::H264);
         assert_eq!(draft.audio_codec, AudioCodec::Aac);
-        assert_eq!(draft.output, Some(PathBuf::from("movie.mov")));
+        assert_eq!(
+            draft.output,
+            Some(OutputTarget::File(PathBuf::from("movie.mov")))
+        );
     }
 
     #[test]

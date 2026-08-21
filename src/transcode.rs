@@ -261,14 +261,50 @@ impl ProgressParser {
     }
 }
 
+/// One conversion, ready to run.
+#[derive(Debug)]
+pub struct QueuedJob {
+    pub spec: CommandSpec,
+    pub artifact: OutputArtifact,
+    /// Source duration, used to turn FFmpeg's progress into a percentage.
+    pub duration: Option<Duration>,
+}
+
+/// Every event carries the index of the job it belongs to, so a queue of one behaves
+/// exactly like a queue of many.
 #[derive(Debug)]
 pub enum WorkerEvent {
-    Started { pid: u32 },
-    Progress(ProgressUpdate),
-    StderrLine(String),
-    Finished { output: PathBuf, elapsed: Duration },
-    Cancelled,
-    Failed(String),
+    Started {
+        index: usize,
+        pid: u32,
+    },
+    Progress {
+        index: usize,
+        update: ProgressUpdate,
+    },
+    StderrLine {
+        index: usize,
+        line: String,
+    },
+    Finished {
+        index: usize,
+        output: PathBuf,
+        elapsed: Duration,
+    },
+    Cancelled {
+        index: usize,
+    },
+    Failed {
+        index: usize,
+        error: String,
+    },
+    /// The queue stopped: every job reached a terminal state, or cancellation ended
+    /// it early. `remaining` counts the jobs that were never started.
+    QueueFinished {
+        elapsed: Duration,
+        cancelled: bool,
+        remaining: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -282,29 +318,66 @@ pub struct TranscodeHandle {
 }
 
 impl TranscodeHandle {
+    /// Stops the running job and abandons whatever is still queued behind it.
     pub fn cancel(&self) {
         let _ = self.command_tx.send(WorkerCommand::Cancel);
     }
 }
 
+/// Runs `jobs` one after another on a background thread. Nothing runs in parallel:
+/// FFmpeg already saturates the machine, and a serial queue keeps progress,
+/// cancellation, and the messages panel unambiguous.
 pub fn spawn_transcode_worker(
-    spec: CommandSpec,
-    artifact: OutputArtifact,
-    duration: Option<Duration>,
+    jobs: Vec<QueuedJob>,
     event_tx: Sender<WorkerEvent>,
 ) -> TranscodeHandle {
     let (command_tx, command_rx) = mpsc::channel();
-    thread::spawn(move || run_worker(spec, artifact, duration, event_tx, command_rx));
+    thread::spawn(move || run_queue(jobs, event_tx, command_rx));
     TranscodeHandle { command_tx }
 }
 
-fn run_worker(
-    spec: CommandSpec,
-    artifact: OutputArtifact,
-    duration: Option<Duration>,
+fn run_queue(
+    jobs: Vec<QueuedJob>,
     event_tx: Sender<WorkerEvent>,
     command_rx: Receiver<WorkerCommand>,
 ) {
+    let started_at = Instant::now();
+    let total = jobs.len();
+    let mut cancelled = false;
+    let mut completed = 0;
+    for (index, job) in jobs.into_iter().enumerate() {
+        // A cancellation that arrives between two jobs must stop the queue rather
+        // than start the next conversion.
+        if matches!(command_rx.try_recv(), Ok(WorkerCommand::Cancel)) {
+            cancelled = true;
+            break;
+        }
+        completed += 1;
+        if run_job(index, job, &event_tx, &command_rx) {
+            cancelled = true;
+            break;
+        }
+    }
+    let _ = event_tx.send(WorkerEvent::QueueFinished {
+        elapsed: started_at.elapsed(),
+        cancelled,
+        remaining: total - completed,
+    });
+}
+
+/// Runs one job to completion. Returns `true` when it was cancelled, which ends the
+/// queue.
+fn run_job(
+    index: usize,
+    job: QueuedJob,
+    event_tx: &Sender<WorkerEvent>,
+    command_rx: &Receiver<WorkerCommand>,
+) -> bool {
+    let QueuedJob {
+        spec,
+        artifact,
+        duration,
+    } = job;
     let started_at = Instant::now();
     let mut child = match Command::new(&spec.program)
         .args(&spec.args)
@@ -316,15 +389,16 @@ fn run_worker(
     {
         Ok(child) => child,
         Err(error) => {
-            let _ = event_tx.send(WorkerEvent::Failed(format!(
-                "Failed to start FFmpeg: {error}"
-            )));
-            return;
+            let _ = event_tx.send(WorkerEvent::Failed {
+                index,
+                error: format!("Failed to start FFmpeg: {error}"),
+            });
+            return false;
         }
     };
 
     let pid = child.id();
-    let _ = event_tx.send(WorkerEvent::Started { pid });
+    let _ = event_tx.send(WorkerEvent::Started { index, pid });
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let progress_tx = event_tx.clone();
@@ -333,7 +407,7 @@ fn run_worker(
         if let Some(stdout) = stdout {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(update) = parser.push_line(&line) {
-                    let _ = progress_tx.send(WorkerEvent::Progress(update));
+                    let _ = progress_tx.send(WorkerEvent::Progress { index, update });
                 }
             }
         }
@@ -347,7 +421,10 @@ fn run_worker(
                     .filter(|character| !character.is_control() || *character == '\t')
                     .take(2_000)
                     .collect();
-                let _ = stderr_tx.send(WorkerEvent::StderrLine(sanitized));
+                let _ = stderr_tx.send(WorkerEvent::StderrLine {
+                    index,
+                    line: sanitized,
+                });
             }
         }
     });
@@ -369,9 +446,10 @@ fn run_worker(
             Ok(None) => {}
             Err(error) => {
                 let _ = child.kill();
-                let _ = event_tx.send(WorkerEvent::Failed(format!(
-                    "Failed while waiting for FFmpeg: {error}"
-                )));
+                let _ = event_tx.send(WorkerEvent::Failed {
+                    index,
+                    error: format!("Failed while waiting for FFmpeg: {error}"),
+                });
                 break None;
             }
         }
@@ -386,20 +464,26 @@ fn run_worker(
     let _ = stderr_thread.join();
 
     let Some(status) = status else {
-        return;
+        return false;
     };
     if cancelling_at.is_some() {
-        let _ = event_tx.send(WorkerEvent::Cancelled);
-    } else if status.success() {
+        let _ = event_tx.send(WorkerEvent::Cancelled { index });
+        return true;
+    }
+    if status.success() {
         match artifact.persist() {
             Ok(output) => {
                 let _ = event_tx.send(WorkerEvent::Finished {
+                    index,
                     output,
                     elapsed: started_at.elapsed(),
                 });
             }
             Err(error) => {
-                let _ = event_tx.send(WorkerEvent::Failed(error.to_string()));
+                let _ = event_tx.send(WorkerEvent::Failed {
+                    index,
+                    error: error.to_string(),
+                });
             }
         }
     } else {
@@ -407,10 +491,14 @@ fn run_worker(
             || "terminated by a signal".to_owned(),
             |code| format!("exit code {code}"),
         );
-        let _ = event_tx.send(WorkerEvent::Failed(format!(
-            "FFmpeg failed with {description}."
-        )));
+        // A failed job does not stop the queue: the files behind it are independent
+        // conversions, and stopping would hide the ones that would have succeeded.
+        let _ = event_tx.send(WorkerEvent::Failed {
+            index,
+            error: format!("FFmpeg failed with {description}."),
+        });
     }
+    false
 }
 
 #[cfg(test)]

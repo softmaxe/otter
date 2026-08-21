@@ -1,12 +1,14 @@
 # fftui
 
-A macOS-first terminal interface for configuring and running single-file FFmpeg transcodes without writing FFmpeg commands by hand.
+A macOS-first terminal interface for configuring and running FFmpeg transcodes — one file or a whole batch — without writing FFmpeg commands by hand.
 
-fftui lets you choose an input and output with native file dialogs, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
+fftui lets you choose one or many inputs with native file dialogs, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
 
 ## Features
 
-- Native macOS Open and Save dialogs
+- One file or many: select a batch and convert it with one set of settings
+- Per-file status while a batch runs, and a per-file summary when it ends
+- Native macOS Open and Save dialogs, with multiple selection for inputs
 - MP4, MOV, Matroska (MKV), and WebM output
 - H.264, H.265, AV1, and VP9 video options where compatible
 - VideoToolbox hardware encoding for H.264 and H.265 on Apple silicon
@@ -15,11 +17,12 @@ fftui lets you choose an input and output with native file dialogs, select compa
 - Video quality presets using codec-specific constant-quality values
 - Target video bitrate presets and custom values
 - Audio bitrate presets and custom values
-- Estimated output size, accurate to a few percent in target-bitrate mode and
-  marked `(rough)` under constant quality
+- Estimated output size for the whole selection, accurate to a few percent in
+  target-bitrate mode and marked `(rough)` under constant quality
 - Shell-safe command preview before execution
 - Live processed time, percentage, speed, and recent FFmpeg messages
-- Graceful cancellation with automatic temporary-output cleanup
+- Graceful cancellation with automatic temporary-output cleanup, which also stops
+  the rest of the batch
 - Refusal to overwrite an existing output file
 
 ## Requirements
@@ -60,16 +63,26 @@ The application must be run directly in an interactive terminal. Redirected stdi
 
 ## Workflow
 
-1. Press `i` and choose an input media file.
-2. Review the detected video, audio, duration, and dimensions.
-3. Press `o` to choose the final output path.
+1. Press `i` and choose one or more input media files. Press `a` to add files from another folder, and `c` to clear the selection.
+2. Review the detected video, audio, duration, and dimensions per file.
+3. Press `o` to choose the final output path. One input asks for a file name; several ask for a destination folder.
 4. Move through settings with `Tab`, `Shift-Tab`, arrow keys, or `h`/`j`/`k`/`l`.
-5. Select a container, compatible codecs, resolution, and rate-control mode.
-6. Press `Enter` to review the exact FFmpeg command.
-7. Press `Enter` or `y` to start the conversion.
+5. Select a container, compatible codecs, resolution, and rate-control mode. They apply to every selected file.
+6. Press `Enter` to review the exact FFmpeg command, plus the list of files the batch would write.
+7. Press `Enter` or `y` to start.
 8. Watch progress and recent FFmpeg messages. Press `x` to open the cancellation confirmation.
 
-Only one conversion runs at a time.
+Only one conversion runs at a time. A batch runs its files one after another, because FFmpeg already uses the whole machine for one encode.
+
+## Batch conversion
+
+Every selected file is converted with the same settings, in the order it was selected.
+
+- Each output is named `<source name>.transcoded.<extension>` inside the chosen folder.
+- A file that ffprobe cannot read blocks the batch until it is removed from the selection, rather than being skipped silently.
+- Two inputs that would produce the same output name are refused before anything runs.
+- A file that fails to convert does not stop the ones behind it. The result screen lists every file with its outcome.
+- Cancelling stops the running conversion and leaves the queued files untouched.
 
 ## Keyboard reference
 
@@ -80,9 +93,11 @@ Only one conversion runs at a time.
 | `Tab` / `Shift-Tab` | Move between settings |
 | `Up` / `Down` or `k` / `j` | Move between settings |
 | `Left` / `Right` or `h` / `l` | Change the selected value |
-| `i` | Choose the input file |
-| `o` | Choose the output file |
-| `r` | Probe the selected input again |
+| `i` | Choose input files, replacing the selection |
+| `a` | Add more input files to the selection |
+| `c` | Clear the selection |
+| `o` | Choose the output file or folder |
+| `r` | Probe the selected inputs again |
 | `Enter` | Edit a bitrate or review the command |
 | `?` | Show keyboard help |
 | `q` | Quit |
@@ -101,7 +116,7 @@ Only one conversion runs at a time.
 | --- | --- |
 | `x` / `Ctrl-C` | Open the cancellation confirmation |
 | `q` / `Esc` | Open the cancellation confirmation |
-| `y` / `Enter` | Confirm cancellation |
+| `y` / `Enter` | Confirm cancellation, stopping the rest of the batch |
 | `n` / `Esc` | Keep running |
 
 ### Result or error
@@ -181,18 +196,19 @@ fftui never executes the preview through a shell. Program arguments remain separ
 
 The application also:
 
-- rejects an output path that matches the input;
+- rejects an output path that matches any selected input;
 - refuses to overwrite an existing final output;
 - writes into an app-owned `.fftui-*` directory beside the destination; and
 - atomically renames the completed temporary file to the final path only after FFmpeg succeeds.
 
 Failed and cancelled jobs remove the app-owned temporary directory. Cancellation sends FFmpeg `SIGINT` first and force-stops it only if it does not exit within approximately three seconds.
 
-## MVP limitations
+## Limitations
 
-The first release intentionally supports one local input file and one conversion at a time. It does not include:
+Conversions run one at a time, from local files. The application does not include:
 
-- batch processing or a persistent queue;
+- parallel encoding or a queue that survives restarting the application;
+- per-file settings within one batch;
 - stream copy;
 - subtitle, attachment, or data-stream copying;
 - custom FFmpeg arguments;
