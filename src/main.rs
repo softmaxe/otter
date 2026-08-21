@@ -54,26 +54,23 @@ fn main() -> Result<()> {
 
         match app.handle_key(key) {
             UiCommand::None => {}
-            UiCommand::OpenInput => {
-                match dialog::prompt(&DialogRequest::OpenInput) {
-                    Ok(Some(path)) => app.select_input(path),
-                    Ok(None) => {}
+            UiCommand::OpenInputs { add } => {
+                match dialog::prompt(&DialogRequest::OpenInputs) {
+                    // An empty selection means the panel was dismissed.
+                    Ok(paths) if paths.is_empty() => {}
+                    Ok(paths) if add => app.add_inputs(paths),
+                    Ok(paths) => app.select_inputs(paths),
                     Err(error) => app.report_error(error.to_string()),
                 }
                 discard_pending_input()?;
             }
             UiCommand::OpenOutput => {
-                let output = app.draft.output.as_ref();
-                let request = DialogRequest::SaveOutput {
-                    directory: output.and_then(|path| path.parent()).map(ToOwned::to_owned),
-                    file_name: output
-                        .and_then(|path| path.file_name())
-                        .and_then(OsStr::to_str)
-                        .map(ToOwned::to_owned),
-                };
-                match dialog::prompt(&request) {
-                    Ok(Some(path)) => app.select_output(path),
-                    Ok(None) => {}
+                match dialog::prompt(&app.output_dialog_request()) {
+                    Ok(paths) => {
+                        if let Some(path) = paths.into_iter().next() {
+                            app.select_output(path);
+                        }
+                    }
                     Err(error) => app.report_error(error.to_string()),
                 }
                 discard_pending_input()?;

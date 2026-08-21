@@ -3,7 +3,7 @@ name = "fftui"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A macOS-first terminal interface for single-file FFmpeg transcoding"
+description = "A macOS-first terminal interface for FFmpeg transcoding, one file or many"
 
 [dependencies]
 anyhow = "1"

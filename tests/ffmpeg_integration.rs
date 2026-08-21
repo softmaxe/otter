@@ -10,12 +10,14 @@ use std::{
 
 use fftui::{
     domain::{
-        AudioCodec, Container, DraftConfig, EstimateBasis, QualityPreset, RateControlMode,
-        Resolution, VideoCodec, estimate_output_size,
+        AudioCodec, Container, DraftConfig, EstimateBasis, OutputTarget, QualityPreset,
+        RateControlMode, Resolution, VideoCodec, estimate_output_size,
     },
     media::probe_media,
     toolchain::Toolchain,
-    transcode::{OutputArtifact, WorkerEvent, build_command_spec, spawn_transcode_worker},
+    transcode::{
+        OutputArtifact, QueuedJob, WorkerEvent, build_command_spec, spawn_transcode_worker,
+    },
 };
 use tempfile::TempDir;
 
@@ -119,8 +121,8 @@ fn transcode(
 ) -> PathBuf {
     let media = probe_media(&toolchain.ffprobe, input).expect("input should be probed");
     let draft = DraftConfig {
-        input: Some(input.to_owned()),
-        output: Some(output.clone()),
+        inputs: vec![input.to_owned()],
+        output: Some(OutputTarget::File(output.clone())),
         container,
         resolution: Resolution::P480,
         rate_control_mode,
@@ -130,12 +132,19 @@ fn transcode(
         ..DraftConfig::default()
     };
     let config = draft
-        .validated(&media)
+        .validated_for(input, &media)
         .expect("configuration should be valid");
     let artifact = OutputArtifact::reserve(output).expect("output should be reserved");
     let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
     let (event_tx, event_rx) = mpsc::channel();
-    let _handle = spawn_transcode_worker(spec, artifact, media.duration, event_tx);
+    let _handle = spawn_transcode_worker(
+        vec![QueuedJob {
+            spec,
+            artifact,
+            duration: media.duration,
+        }],
+        event_tx,
+    );
     wait_for_finished(&event_rx)
 }
 
@@ -149,10 +158,12 @@ fn wait_for_finished(event_rx: &Receiver<WorkerEvent>) -> PathBuf {
             .expect("FFmpeg worker disconnected")
         {
             WorkerEvent::Finished { output, .. } => return output,
-            WorkerEvent::Failed(error) => panic!("FFmpeg worker failed: {error}"),
-            WorkerEvent::Cancelled => panic!("FFmpeg worker was unexpectedly cancelled"),
-            WorkerEvent::Started { .. } | WorkerEvent::Progress(_) | WorkerEvent::StderrLine(_) => {
-            }
+            WorkerEvent::Failed { error, .. } => panic!("FFmpeg worker failed: {error}"),
+            WorkerEvent::Cancelled { .. } => panic!("FFmpeg worker was unexpectedly cancelled"),
+            WorkerEvent::Started { .. }
+            | WorkerEvent::Progress { .. }
+            | WorkerEvent::StderrLine { .. }
+            | WorkerEvent::QueueFinished { .. } => {}
         }
     }
 }
@@ -204,8 +215,8 @@ fn target_bitrate_estimate_matches_a_real_encode() {
     let media = probe_media(&toolchain.ffprobe, &source).expect("source should be probed");
     let output = directory.path().join("estimated.mp4");
     let draft = DraftConfig {
-        input: Some(source.clone()),
-        output: Some(output.clone()),
+        inputs: vec![source.clone()],
+        output: Some(OutputTarget::File(output.clone())),
         resolution: Resolution::Source,
         rate_control_mode: RateControlMode::Bitrate,
         video_bitrate_kbps: 1_200,
@@ -216,12 +227,19 @@ fn target_bitrate_estimate_matches_a_real_encode() {
     assert_eq!(estimate.basis, EstimateBasis::Targeted);
 
     let config = draft
-        .validated(&media)
+        .validated_for(&source, &media)
         .expect("configuration should be valid");
     let artifact = OutputArtifact::reserve(output).expect("output should be reserved");
     let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
     let (event_tx, event_rx) = mpsc::channel();
-    let _handle = spawn_transcode_worker(spec, artifact, media.duration, event_tx);
+    let _handle = spawn_transcode_worker(
+        vec![QueuedJob {
+            spec,
+            artifact,
+            duration: media.duration,
+        }],
+        event_tx,
+    );
     let produced = wait_for_finished(&event_rx);
 
     let actual = fs::metadata(&produced).expect("output should exist").len() as f64;
@@ -314,8 +332,8 @@ fn videotoolbox_encoders_produce_playable_output() {
         }
         let output = directory.path().join(name);
         let draft = DraftConfig {
-            input: Some(with_audio.clone()),
-            output: Some(output.clone()),
+            inputs: vec![with_audio.clone()],
+            output: Some(OutputTarget::File(output.clone())),
             container: if codec == VideoCodec::H265Hw {
                 Container::Mov
             } else {
@@ -327,12 +345,19 @@ fn videotoolbox_encoders_produce_playable_output() {
             ..DraftConfig::default()
         };
         let config = draft
-            .validated(&media)
+            .validated_for(&with_audio, &media)
             .expect("hardware configuration should be valid");
         let artifact = OutputArtifact::reserve(output).expect("output should be reserved");
         let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
         let (event_tx, event_rx) = mpsc::channel();
-        let _handle = spawn_transcode_worker(spec, artifact, media.duration, event_tx);
+        let _handle = spawn_transcode_worker(
+            vec![QueuedJob {
+                spec,
+                artifact,
+                duration: media.duration,
+            }],
+            event_tx,
+        );
 
         let output = wait_for_finished(&event_rx);
         let result = probe_media(&toolchain.ffprobe, &output).expect("output should be probed");
@@ -343,6 +368,233 @@ fn videotoolbox_encoders_produce_playable_output() {
             Some("aac")
         );
     }
+}
+
+/// The queue is the single-file path repeated, so the claim worth checking end to end
+/// is that several sources with one set of settings land as several distinct files in
+/// the chosen folder, each converted from its own input.
+#[test]
+fn transcodes_a_queue_of_several_files_into_one_folder() {
+    let Some(toolchain) = available_toolchain() else {
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let (with_audio, without_audio) = generate_media(&toolchain, &directory);
+    let exports = directory.path().join("exports");
+    fs::create_dir(&exports).expect("output folder should be created");
+
+    let draft = DraftConfig {
+        inputs: vec![with_audio.clone(), without_audio.clone()],
+        output: Some(OutputTarget::Directory(exports.clone())),
+        container: Container::Mov,
+        resolution: Resolution::P480,
+        rate_control_mode: RateControlMode::Bitrate,
+        video_bitrate_kbps: 800,
+        audio_bitrate_kbps: 96,
+        ..DraftConfig::default()
+    };
+    let sources: Vec<_> = draft
+        .inputs
+        .iter()
+        .map(|input| {
+            (
+                input.as_path(),
+                probe_media(&toolchain.ffprobe, input).expect("input should be probed"),
+            )
+        })
+        .collect();
+    let borrowed: Vec<_> = sources
+        .iter()
+        .map(|(input, media)| (*input, media))
+        .collect();
+    let configs = draft
+        .validated_queue(&borrowed)
+        .expect("the queue should be valid");
+    assert_eq!(
+        configs
+            .iter()
+            .map(|config| &config.output)
+            .collect::<Vec<_>>(),
+        vec![
+            &exports.join("source with audio.transcoded.mov"),
+            &exports.join("silent source.transcoded.mov"),
+        ]
+    );
+
+    let jobs: Vec<_> = configs
+        .iter()
+        .zip(&sources)
+        .map(|(config, (_, media))| {
+            let artifact =
+                OutputArtifact::reserve(config.output.clone()).expect("output should be reserved");
+            let spec = build_command_spec(&toolchain.ffmpeg, config, media, &artifact);
+            QueuedJob {
+                spec,
+                artifact,
+                duration: media.duration,
+            }
+        })
+        .collect();
+    let (event_tx, event_rx) = mpsc::channel();
+    let _handle = spawn_transcode_worker(jobs, event_tx);
+
+    let mut finished = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for the queue");
+        match event_rx
+            .recv_timeout(remaining)
+            .expect("FFmpeg worker disconnected")
+        {
+            WorkerEvent::Finished { index, output, .. } => finished.push((index, output)),
+            WorkerEvent::Failed { error, .. } => panic!("FFmpeg worker failed: {error}"),
+            WorkerEvent::Cancelled { .. } => panic!("the queue was unexpectedly cancelled"),
+            WorkerEvent::QueueFinished {
+                cancelled,
+                remaining,
+                ..
+            } => {
+                assert!(!cancelled);
+                assert_eq!(remaining, 0);
+                break;
+            }
+            WorkerEvent::Started { .. }
+            | WorkerEvent::Progress { .. }
+            | WorkerEvent::StderrLine { .. } => {}
+        }
+    }
+
+    // Every job reports under its own index, and every output is a real file.
+    assert_eq!(finished.len(), 2);
+    assert_eq!(finished[0].0, 0);
+    assert_eq!(finished[1].0, 1);
+    // Each output carries the streams of its own input, not the first one twice: the
+    // fixtures differ in both dimensions and audio.
+    for ((index, output), (width, height, has_audio)) in
+        finished.iter().zip([(320, 180, true), (160, 90, false)])
+    {
+        assert_eq!(output, &configs[*index].output);
+        let produced = probe_media(&toolchain.ffprobe, output).expect("output should be probed");
+        assert_eq!(
+            (produced.video.width, produced.video.height),
+            (width, height)
+        );
+        assert_eq!(produced.audio.is_some(), has_audio);
+    }
+    assert!(!has_app_temporary_directory(&exports));
+}
+
+/// Cancelling a queue stops the file being written and never starts the rest.
+#[test]
+fn cancelling_a_queue_leaves_the_files_behind_it_untouched() {
+    let Some(toolchain) = available_toolchain() else {
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary directory should be created");
+    let mut inputs = Vec::new();
+    for name in ["long one.mp4", "long two.mp4"] {
+        let input = directory.path().join(name);
+        run_ffmpeg(
+            &toolchain.ffmpeg,
+            &[
+                OsStr::new("-hide_banner"),
+                OsStr::new("-loglevel"),
+                OsStr::new("error"),
+                OsStr::new("-y"),
+                OsStr::new("-f"),
+                OsStr::new("lavfi"),
+                OsStr::new("-i"),
+                OsStr::new("testsrc2=size=1280x720:rate=30"),
+                OsStr::new("-t"),
+                OsStr::new("8"),
+                OsStr::new("-c:v"),
+                OsStr::new("mpeg4"),
+                OsStr::new("-q:v"),
+                OsStr::new("8"),
+                OsStr::new("-an"),
+                input.as_os_str(),
+            ],
+        );
+        inputs.push(input);
+    }
+    let exports = directory.path().join("exports");
+    fs::create_dir(&exports).expect("output folder should be created");
+
+    let draft = DraftConfig {
+        inputs: inputs.clone(),
+        output: Some(OutputTarget::Directory(exports.clone())),
+        audio_codec: AudioCodec::None,
+        ..DraftConfig::default()
+    };
+    let media: Vec<_> = inputs
+        .iter()
+        .map(|input| probe_media(&toolchain.ffprobe, input).expect("input should be probed"))
+        .collect();
+    let borrowed: Vec<_> = inputs
+        .iter()
+        .map(|input| input.as_path())
+        .zip(media.iter())
+        .collect();
+    let configs = draft
+        .validated_queue(&borrowed)
+        .expect("the queue should be valid");
+    let jobs: Vec<_> = configs
+        .iter()
+        .zip(&media)
+        .map(|(config, media)| {
+            let artifact =
+                OutputArtifact::reserve(config.output.clone()).expect("output should be reserved");
+            let spec = build_command_spec(&toolchain.ffmpeg, config, media, &artifact);
+            QueuedJob {
+                spec,
+                artifact,
+                duration: media.duration,
+            }
+        })
+        .collect();
+    let (event_tx, event_rx) = mpsc::channel();
+    let handle = spawn_transcode_worker(jobs, event_tx);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut started = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "timed out waiting for cancellation");
+        match event_rx
+            .recv_timeout(remaining)
+            .expect("FFmpeg worker disconnected")
+        {
+            WorkerEvent::Started { index, .. } => {
+                started += 1;
+                assert_eq!(index, 0, "the second file must never start");
+                handle.cancel();
+            }
+            WorkerEvent::QueueFinished {
+                cancelled,
+                remaining,
+                ..
+            } => {
+                assert!(cancelled);
+                assert_eq!(remaining, 1, "the queued file must be left unstarted");
+                break;
+            }
+            WorkerEvent::Finished { .. } => panic!("FFmpeg completed before cancellation"),
+            WorkerEvent::Failed { error, .. } => panic!("FFmpeg worker failed: {error}"),
+            WorkerEvent::Cancelled { index } => assert_eq!(index, 0),
+            WorkerEvent::Progress { .. } | WorkerEvent::StderrLine { .. } => {}
+        }
+    }
+
+    assert_eq!(started, 1);
+    for config in &configs {
+        assert!(!config.output.exists());
+    }
+    let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+    while has_app_temporary_directory(&exports) && Instant::now() < cleanup_deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!has_app_temporary_directory(&exports));
 }
 
 #[test]
@@ -377,8 +629,8 @@ fn cancellation_removes_final_and_temporary_outputs() {
     let media = probe_media(&toolchain.ffprobe, &input).expect("input should be probed");
     let output = directory.path().join("cancelled.mp4");
     let draft = DraftConfig {
-        input: Some(input),
-        output: Some(output.clone()),
+        inputs: vec![input.clone()],
+        output: Some(OutputTarget::File(output.clone())),
         container: Container::Mp4,
         video_codec: VideoCodec::H264,
         audio_codec: AudioCodec::None,
@@ -389,12 +641,19 @@ fn cancellation_removes_final_and_temporary_outputs() {
         audio_bitrate_kbps: 192,
     };
     let config = draft
-        .validated(&media)
+        .validated_for(&input, &media)
         .expect("configuration should be valid");
     let artifact = OutputArtifact::reserve(output.clone()).expect("output should be reserved");
     let spec = build_command_spec(&toolchain.ffmpeg, &config, &media, &artifact);
     let (event_tx, event_rx) = mpsc::channel();
-    let handle = spawn_transcode_worker(spec, artifact, media.duration, event_tx);
+    let handle = spawn_transcode_worker(
+        vec![QueuedJob {
+            spec,
+            artifact,
+            duration: media.duration,
+        }],
+        event_tx,
+    );
 
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
@@ -408,10 +667,12 @@ fn cancellation_removes_final_and_temporary_outputs() {
             .expect("FFmpeg worker disconnected")
         {
             WorkerEvent::Started { .. } => handle.cancel(),
-            WorkerEvent::Cancelled => break,
+            WorkerEvent::Cancelled { .. } => break,
             WorkerEvent::Finished { .. } => panic!("FFmpeg completed before cancellation"),
-            WorkerEvent::Failed(error) => panic!("FFmpeg worker failed: {error}"),
-            WorkerEvent::Progress(_) | WorkerEvent::StderrLine(_) => {}
+            WorkerEvent::Failed { error, .. } => panic!("FFmpeg worker failed: {error}"),
+            WorkerEvent::Progress { .. }
+            | WorkerEvent::StderrLine { .. }
+            | WorkerEvent::QueueFinished { .. } => {}
         }
     }
 
