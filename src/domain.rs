@@ -434,13 +434,10 @@ pub struct TranscodeConfig {
 
 #[derive(Debug, Clone)]
 pub struct InputMedia {
-    pub path: PathBuf,
     pub duration: Option<Duration>,
     pub video: VideoStreamInfo,
-    pub audio: Option<AudioStreamInfo>,
-    pub format_name: Option<String>,
-    /// Container size on disk, when ffprobe reported it.
-    pub size_bytes: Option<u64>,
+    /// Codec of the primary audio stream, absent when the source is silent.
+    pub audio: Option<String>,
     /// Overall container bitrate, covering every stream plus muxing overhead.
     pub bitrate_kbps: Option<u32>,
 }
@@ -454,13 +451,6 @@ pub struct VideoStreamInfo {
     pub frame_rate: Option<f64>,
     /// Bitrate of this stream alone; many containers omit it.
     pub bitrate_kbps: Option<u32>,
-}
-
-#[derive(Debug, Clone)]
-pub struct AudioStreamInfo {
-    pub codec: String,
-    pub channels: Option<u32>,
-    pub sample_rate: Option<u32>,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -862,19 +852,8 @@ mod tests {
 
     fn queue_media() -> InputMedia {
         InputMedia {
-            path: PathBuf::from("clip.mp4"),
-            duration: Some(Duration::from_secs(10)),
-            video: VideoStreamInfo {
-                codec: "h264".to_owned(),
-                width: 1920,
-                height: 1080,
-                frame_rate: Some(30.0),
-                bitrate_kbps: Some(8_000),
-            },
             audio: None,
-            format_name: Some("mov,mp4".to_owned()),
-            size_bytes: Some(10_000_000),
-            bitrate_kbps: Some(8_000),
+            ..probed_media()
         }
     }
 
@@ -1135,23 +1114,16 @@ mod tests {
 
     fn probed_media() -> InputMedia {
         InputMedia {
-            path: PathBuf::from("clip.mp4"),
             duration: Some(Duration::from_secs(10)),
             video: VideoStreamInfo {
                 codec: "h264".to_owned(),
                 width: 1920,
                 height: 1080,
                 frame_rate: Some(30.0),
-                // A plausible 1080p30 H.264 source; the blend reads this directly.
+                // A plausible 1080p30 H.264 source; the ceiling reads this directly.
                 bitrate_kbps: Some(8_000),
             },
-            audio: Some(AudioStreamInfo {
-                codec: "aac".to_owned(),
-                channels: Some(2),
-                sample_rate: Some(48_000),
-            }),
-            format_name: Some("mov,mp4".to_owned()),
-            size_bytes: Some(10_000_000),
+            audio: Some("aac".to_owned()),
             bitrate_kbps: Some(8_000),
         }
     }

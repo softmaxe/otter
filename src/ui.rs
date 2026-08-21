@@ -4,7 +4,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, Gauge, Paragraph, Wrap},
@@ -37,16 +37,14 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         frame.area(),
     );
     let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(source_panel_height(app, area)),
-            Constraint::Length(12),
-            Constraint::Min(4),
-            Constraint::Length(1),
-        ])
-        .split(area);
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(source_panel_height(app, area)),
+        Constraint::Length(12),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(area);
 
     render_header(frame, app, chunks[0]);
     render_source(frame, app, chunks[1]);
@@ -190,11 +188,7 @@ fn media_summary(media: &InputMedia) -> String {
         .duration
         .map(format_duration)
         .unwrap_or_else(|| "Unknown".to_owned());
-    let audio = media
-        .audio
-        .as_ref()
-        .map(|audio| audio.codec.as_str())
-        .unwrap_or("None");
+    let audio = media.audio.as_deref().unwrap_or("None");
     format!(
         "{}×{}  •  {}  •  video {}  •  audio {}",
         media.video.width, media.video.height, duration, media.video.codec, audio
@@ -483,10 +477,7 @@ fn render_confirmation(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_progress(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(2)])
-        .split(area);
+    let sections = Layout::vertical([Constraint::Length(3), Constraint::Min(2)]).split(area);
     let (ratio, label) = match &app.job {
         JobState::Running {
             progress: Some(progress),
@@ -798,22 +789,13 @@ fn panel_block<'a>(title: &str) -> Block<'a> {
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1])[1]
+    let [area] = Layout::vertical([Constraint::Percentage(percent_y)])
+        .flex(Flex::Center)
+        .areas(area);
+    let [area] = Layout::horizontal([Constraint::Percentage(percent_x)])
+        .flex(Flex::Center)
+        .areas(area);
+    area
 }
 
 fn short_version(version: &str) -> String {
@@ -846,7 +828,7 @@ mod tests {
     use super::*;
     use crate::{
         app::{JobOutcome, JobRecord},
-        domain::{AudioStreamInfo, InputMedia, RateControlMode, VideoStreamInfo},
+        domain::{InputMedia, RateControlMode, VideoStreamInfo},
         toolchain::Toolchain,
     };
 
@@ -876,7 +858,6 @@ mod tests {
 
     fn probed_media() -> InputMedia {
         InputMedia {
-            path: PathBuf::from("clip.mp4"),
             duration: Some(Duration::from_secs(10)),
             video: VideoStreamInfo {
                 codec: "h264".to_owned(),
@@ -885,13 +866,7 @@ mod tests {
                 frame_rate: Some(30.0),
                 bitrate_kbps: Some(100_000),
             },
-            audio: Some(AudioStreamInfo {
-                codec: "aac".to_owned(),
-                channels: Some(2),
-                sample_rate: Some(48_000),
-            }),
-            format_name: Some("mov,mp4".to_owned()),
-            size_bytes: Some(125_000_000),
+            audio: Some("aac".to_owned()),
             bitrate_kbps: Some(100_000),
         }
     }

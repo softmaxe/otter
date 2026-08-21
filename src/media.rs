@@ -1,13 +1,9 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
-};
+use std::{path::Path, process::Command, time::Duration};
 
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::domain::{AudioStreamInfo, InputMedia, VideoStreamInfo};
+use crate::domain::{InputMedia, VideoStreamInfo};
 
 #[derive(Debug, Error)]
 pub enum ProbeError {
@@ -47,10 +43,10 @@ pub fn probe_media(ffprobe: &Path, input: &Path) -> Result<InputMedia, ProbeErro
         )));
     }
 
-    parse_probe_json(input.to_owned(), &output.stdout)
+    parse_probe_json(&output.stdout)
 }
 
-fn parse_probe_json(path: PathBuf, bytes: &[u8]) -> Result<InputMedia, ProbeError> {
+fn parse_probe_json(bytes: &[u8]) -> Result<InputMedia, ProbeError> {
     let response: ProbeResponse = serde_json::from_slice(bytes)?;
     let video = response
         .streams
@@ -69,14 +65,7 @@ fn parse_probe_json(path: PathBuf, bytes: &[u8]) -> Result<InputMedia, ProbeErro
         .streams
         .iter()
         .find(|stream| stream.codec_type.as_deref() == Some("audio"))
-        .map(|stream| AudioStreamInfo {
-            codec: stream
-                .codec_name
-                .clone()
-                .unwrap_or_else(|| "unknown".to_owned()),
-            channels: stream.channels,
-            sample_rate: stream.sample_rate.as_deref().and_then(parse_u32),
-        });
+        .map(|stream| codec_name(stream.codec_name.as_deref()));
     let duration = response
         .format
         .as_ref()
@@ -91,34 +80,27 @@ fn parse_probe_json(path: PathBuf, bytes: &[u8]) -> Result<InputMedia, ProbeErro
         .as_deref()
         .and_then(parse_frame_rate)
         .or_else(|| video.r_frame_rate.as_deref().and_then(parse_frame_rate));
-    let video_bitrate_kbps = video.bit_rate.as_deref().and_then(parse_bitrate_kbps);
-    let codec = video
-        .codec_name
-        .clone()
-        .unwrap_or_else(|| "unknown".to_owned());
-    let format = response.format;
 
     Ok(InputMedia {
-        path,
         duration,
         video: VideoStreamInfo {
-            codec,
+            codec: codec_name(video.codec_name.as_deref()),
             width,
             height,
             frame_rate,
-            bitrate_kbps: video_bitrate_kbps,
+            bitrate_kbps: video.bit_rate.as_deref().and_then(parse_bitrate_kbps),
         },
         audio,
-        size_bytes: format
-            .as_ref()
-            .and_then(|format| format.size.as_deref())
-            .and_then(|value| value.parse::<u64>().ok()),
-        bitrate_kbps: format
+        bitrate_kbps: response
+            .format
             .as_ref()
             .and_then(|format| format.bit_rate.as_deref())
             .and_then(parse_bitrate_kbps),
-        format_name: format.and_then(|format| format.format_name),
     })
+}
+
+fn codec_name(name: Option<&str>) -> String {
+    name.unwrap_or("unknown").to_owned()
 }
 
 /// ffprobe reports frame rates as the rational `num/den`, using `0/0` when unknown.
@@ -138,10 +120,6 @@ fn parse_bitrate_kbps(value: &str) -> Option<u32> {
 fn parse_duration(value: &str) -> Option<Duration> {
     let seconds = value.parse::<f64>().ok()?;
     (seconds.is_finite() && seconds >= 0.0).then(|| Duration::from_secs_f64(seconds))
-}
-
-fn parse_u32(value: &str) -> Option<u32> {
-    value.parse().ok()
 }
 
 fn sanitize_message(message: &str) -> String {
@@ -169,8 +147,6 @@ struct ProbeStream {
     width: Option<u32>,
     height: Option<u32>,
     duration: Option<String>,
-    channels: Option<u32>,
-    sample_rate: Option<String>,
     bit_rate: Option<String>,
     r_frame_rate: Option<String>,
     avg_frame_rate: Option<String>,
@@ -178,10 +154,8 @@ struct ProbeStream {
 
 #[derive(Debug, Deserialize)]
 struct ProbeFormat {
-    format_name: Option<String>,
     duration: Option<String>,
     bit_rate: Option<String>,
-    size: Option<String>,
 }
 
 #[cfg(test)]
@@ -198,11 +172,11 @@ mod tests {
             "format":{"format_name":"mov,mp4","duration":"12.5"}
         }"#;
 
-        let media = parse_probe_json(PathBuf::from("clip.mp4"), json).unwrap();
+        let media = parse_probe_json(json).unwrap();
 
         assert_eq!(media.video.width, 1920);
         assert_eq!(media.video.height, 1080);
-        assert_eq!(media.audio.unwrap().sample_rate, Some(48_000));
+        assert_eq!(media.audio.as_deref(), Some("aac"));
         assert_eq!(media.duration, Some(Duration::from_secs_f64(12.5)));
     }
 
@@ -217,13 +191,12 @@ mod tests {
             "format":{"format_name":"mov,mp4","duration":"60","bit_rate":"7692000","size":"57690000"}
         }"#;
 
-        let media = parse_probe_json(PathBuf::from("clip.mp4"), json).unwrap();
+        let media = parse_probe_json(json).unwrap();
 
         // The measured average wins over the container's nominal rate.
         assert_eq!(media.video.frame_rate, Some(24_000.0 / 1_001.0));
         assert_eq!(media.video.bitrate_kbps, Some(7_500));
         assert_eq!(media.bitrate_kbps, Some(7_692));
-        assert_eq!(media.size_bytes, Some(57_690_000));
     }
 
     #[test]
@@ -236,13 +209,12 @@ mod tests {
             "format":{"format_name":"matroska","duration":"60","bit_rate":"N/A","size":"N/A"}
         }"#;
 
-        let media = parse_probe_json(PathBuf::from("clip.mkv"), json).unwrap();
+        let media = parse_probe_json(json).unwrap();
 
         // `0/0` is ffprobe's "unknown", so the nominal rate fills in.
         assert_eq!(media.video.frame_rate, Some(25.0));
         assert_eq!(media.video.bitrate_kbps, None);
         assert_eq!(media.bitrate_kbps, None);
-        assert_eq!(media.size_bytes, None);
     }
 
     #[test]
@@ -252,7 +224,7 @@ mod tests {
             "format":{"format_name":"matroska","duration":"N/A"}
         }"#;
 
-        let media = parse_probe_json(PathBuf::from("clip.mkv"), json).unwrap();
+        let media = parse_probe_json(json).unwrap();
 
         assert!(media.audio.is_none());
         assert!(media.duration.is_none());

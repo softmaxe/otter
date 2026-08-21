@@ -10,12 +10,25 @@ use thiserror::Error;
 
 use crate::domain::{AudioCodec, VideoCodec};
 
+/// The encoders this app can offer. Discovery only asks whether the local FFmpeg
+/// build reports these; anything else it can do is irrelevant here.
+const ENCODERS: [&str; 9] = [
+    "libx264",
+    "libx265",
+    "libsvtav1",
+    "libvpx-vp9",
+    "h264_videotoolbox",
+    "hevc_videotoolbox",
+    "aac",
+    "libopus",
+    "libmp3lame",
+];
+
 #[derive(Debug, Clone)]
 pub struct Toolchain {
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
     pub ffmpeg_version: String,
-    pub ffprobe_version: String,
     encoders: HashSet<String>,
 }
 
@@ -25,14 +38,15 @@ impl Toolchain {
         let ffprobe =
             resolve_tool("FFTUI_FFPROBE", "ffprobe").ok_or(ToolError::NotFound("ffprobe"))?;
         let ffmpeg_version = version_line(&ffmpeg)?;
-        let ffprobe_version = version_line(&ffprobe)?;
+        // The line itself is unused; running it is what proves ffprobe is executable
+        // before the first file is read.
+        version_line(&ffprobe)?;
         let encoders = detect_encoders(&ffmpeg)?;
 
         Ok(Self {
             ffmpeg,
             ffprobe,
             ffmpeg_version,
-            ffprobe_version,
             encoders,
         })
     }
@@ -53,21 +67,7 @@ impl Toolchain {
             ffmpeg: PathBuf::from("/usr/local/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/local/bin/ffprobe"),
             ffmpeg_version: "ffmpeg version 8.1.2".to_owned(),
-            ffprobe_version: "ffprobe version 8.1.2".to_owned(),
-            encoders: [
-                "libx264",
-                "libx265",
-                "libsvtav1",
-                "libvpx-vp9",
-                "h264_videotoolbox",
-                "hevc_videotoolbox",
-                "aac",
-                "libopus",
-                "libmp3lame",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
+            encoders: ENCODERS.into_iter().map(str::to_owned).collect(),
         }
     }
 }
@@ -90,7 +90,7 @@ pub enum ToolError {
 
 fn resolve_tool(override_name: &str, binary: &str) -> Option<PathBuf> {
     if let Some(path) = env::var_os(override_name).map(PathBuf::from)
-        && is_executable_file(&path)
+        && path.is_file()
     {
         return Some(path);
     }
@@ -98,7 +98,7 @@ fn resolve_tool(override_name: &str, binary: &str) -> Option<PathBuf> {
     if let Some(paths) = env::var_os("PATH") {
         for directory in env::split_paths(&paths) {
             let candidate = directory.join(binary);
-            if is_executable_file(&candidate) {
+            if candidate.is_file() {
                 return Some(candidate);
             }
         }
@@ -107,11 +107,7 @@ fn resolve_tool(override_name: &str, binary: &str) -> Option<PathBuf> {
     ["/opt/homebrew/bin", "/usr/local/bin"]
         .into_iter()
         .map(|directory| Path::new(directory).join(binary))
-        .find(|candidate| is_executable_file(candidate))
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
+        .find(|candidate| candidate.is_file())
 }
 
 fn version_line(path: &Path) -> Result<String, ToolError> {
@@ -126,20 +122,10 @@ fn version_line(path: &Path) -> Result<String, ToolError> {
 fn detect_encoders(path: &Path) -> Result<HashSet<String>, ToolError> {
     let output = run(path, [OsStr::new("-hide_banner"), OsStr::new("-encoders")])?;
     let text = String::from_utf8_lossy(&output.stdout);
-    let names = [
-        "libx264",
-        "libx265",
-        "libsvtav1",
-        "libvpx-vp9",
-        "h264_videotoolbox",
-        "hevc_videotoolbox",
-        "aac",
-        "libopus",
-        "libmp3lame",
-    ];
-    Ok(names
+    let reported: HashSet<&str> = text.split_whitespace().collect();
+    Ok(ENCODERS
         .into_iter()
-        .filter(|name| text.split_whitespace().any(|word| word == *name))
+        .filter(|name| reported.contains(name))
         .map(str::to_owned)
         .collect())
 }
