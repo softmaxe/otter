@@ -74,6 +74,8 @@ The application must be run directly in an interactive terminal. Redirected stdi
 
 Only one conversion runs at a time. A batch runs its files one after another, because FFmpeg already uses the whole machine for one encode.
 
+Mouse control is available alongside the keyboard shortcuts. Left-click a setting to activate it, use the wheel or right-click to move its value forward or backward, and left-click the footer to run the action shown there. On the Input row, right-click adds files and middle-click clears the selection.
+
 ## Batch conversion
 
 Every selected file is converted with the same settings, in the order it was selected.

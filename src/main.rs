@@ -38,21 +38,21 @@ fn main() -> Result<()> {
 
     loop {
         app.poll_background();
-        terminal
+        let area = terminal
             .terminal_mut()
-            .draw(|frame| ui::render(frame, &app))?;
+            .draw(|frame| ui::render(frame, &app))?
+            .area;
 
         if !event::poll(Duration::from_millis(50))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let command = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
+            Event::Mouse(mouse) => ui::handle_mouse(&mut app, mouse, area),
+            _ => continue,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
 
-        match app.handle_key(key) {
+        match command {
             UiCommand::None => {}
             UiCommand::OpenInputs { add } => {
                 match dialog::prompt(&DialogRequest::OpenInputs) {
