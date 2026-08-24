@@ -1,5 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use ratatui::{
@@ -11,7 +12,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, ConfigField, JobOutcome, JobRecord, JobState, Screen},
+    app::{App, ConfigField, JobOutcome, JobRecord, JobState, Screen, UiCommand},
     domain::{EstimateBasis, InputMedia, OutputTarget, RateControlMode, SizeEstimate, file_label},
 };
 
@@ -31,26 +32,26 @@ const SECONDARY: Color = Color::Rgb(137, 180, 250); // blue   #89b4fa
 const WARNING: Color = Color::Rgb(249, 226, 175); // yellow #f9e2af
 const ERROR: Color = Color::Rgb(243, 139, 168); // red    #f38ba8
 
+#[derive(Clone, Copy)]
+struct UiLayout {
+    source: Rect,
+    settings: Rect,
+    workspace: Rect,
+    footer: Rect,
+}
+
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     frame.render_widget(
         Block::default().style(Style::default().bg(BG)),
         frame.area(),
     );
     let area = frame.area();
-    let chunks = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Length(source_panel_height(app, area)),
-        Constraint::Length(12),
-        Constraint::Min(4),
-        Constraint::Length(1),
-    ])
-    .split(area);
-
-    render_header(frame, app, chunks[0]);
-    render_source(frame, app, chunks[1]);
-    render_settings(frame, app, chunks[2]);
-    render_workspace(frame, app, chunks[3]);
-    render_footer(frame, app, chunks[4]);
+    let layout = ui_layout(app, area);
+    render_header(frame, app, Rect::new(area.x, area.y, area.width, 3));
+    render_source(frame, app, layout.source);
+    render_settings(frame, app, layout.settings);
+    render_workspace(frame, app, layout.workspace);
+    render_footer(frame, app, layout.footer);
 
     if app.help_visible {
         render_help(frame, area);
@@ -61,6 +62,235 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     if let Some((value, field)) = app.numeric_edit_value() {
         render_numeric_edit(frame, area, value, field);
     }
+}
+
+fn ui_layout(app: &App, area: Rect) -> UiLayout {
+    let chunks = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(source_panel_height(app, area)),
+        Constraint::Length(12),
+        Constraint::Min(4),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    UiLayout {
+        source: chunks[1],
+        settings: chunks[2],
+        workspace: chunks[3],
+        footer: chunks[4],
+    }
+}
+
+pub fn handle_mouse(app: &mut App, event: MouseEvent, area: Rect) -> UiCommand {
+    if app.help_visible {
+        return match event.kind {
+            MouseEventKind::Down(_) => app.handle_key(KeyEvent::from(KeyCode::Esc)),
+            _ => UiCommand::None,
+        };
+    }
+    if app.cancel_confirmation || app.numeric_edit_value().is_some() {
+        return handle_popup_mouse(app, event, area);
+    }
+
+    let layout = ui_layout(app, area);
+    if app.screen == Screen::Configure {
+        if let Some(field) = setting_at(layout.settings, event.column, event.row) {
+            app.focus = field;
+            if (field == ConfigField::AudioCodec && app.all_sources_silent())
+                || (field == ConfigField::AudioBitrate && !app.audio_bitrate_enabled())
+            {
+                return UiCommand::None;
+            }
+            return match event.kind {
+                MouseEventKind::Down(MouseButton::Right) if field == ConfigField::Input => {
+                    UiCommand::OpenInputs { add: true }
+                }
+                MouseEventKind::ScrollUp | MouseEventKind::Down(MouseButton::Right) => {
+                    app.handle_key(KeyEvent::from(KeyCode::Left))
+                }
+                MouseEventKind::ScrollDown => app.handle_key(KeyEvent::from(KeyCode::Right)),
+                MouseEventKind::Down(MouseButton::Middle) if field == ConfigField::Input => {
+                    app.handle_key(KeyEvent::from(KeyCode::Char('c')))
+                }
+                MouseEventKind::Down(MouseButton::Left) => activate_setting(app, field),
+                _ => UiCommand::None,
+            };
+        }
+        if contains(layout.source, event.column, event.row) {
+            return match event.kind {
+                MouseEventKind::Down(MouseButton::Left) => UiCommand::OpenInputs { add: false },
+                MouseEventKind::Down(MouseButton::Right) => UiCommand::OpenInputs { add: true },
+                _ => UiCommand::None,
+            };
+        }
+    }
+
+    if event.kind == MouseEventKind::Down(MouseButton::Left)
+        && let Some(code) = footer_key_at(app.screen, layout.footer, event.column, event.row)
+    {
+        if app.screen == Screen::Configure && code == KeyCode::Enter {
+            app.prepare_confirmation();
+            return UiCommand::None;
+        }
+        return app.handle_key(KeyEvent::from(code));
+    }
+
+    UiCommand::None
+}
+
+fn activate_setting(app: &mut App, field: ConfigField) -> UiCommand {
+    match field {
+        ConfigField::Input | ConfigField::Output => app.handle_key(KeyEvent::from(KeyCode::Enter)),
+        ConfigField::RateValue if app.draft.rate_control_mode == RateControlMode::Bitrate => {
+            app.handle_key(KeyEvent::from(KeyCode::Enter))
+        }
+        ConfigField::AudioBitrate if app.audio_bitrate_enabled() => {
+            app.handle_key(KeyEvent::from(KeyCode::Enter))
+        }
+        _ => app.handle_key(KeyEvent::from(KeyCode::Right)),
+    }
+}
+
+fn handle_popup_mouse(app: &mut App, event: MouseEvent, area: Rect) -> UiCommand {
+    let code = match event.kind {
+        MouseEventKind::Down(MouseButton::Right) => Some(KeyCode::Esc),
+        MouseEventKind::Down(MouseButton::Left) if app.cancel_confirmation => {
+            let popup = centered_rect(56, 24, area);
+            let content = bordered_inner(popup);
+            let line = "[y/Enter] Cancel job    [n/Esc] Keep running";
+            if centered_text_hit(
+                content,
+                content.y + 2,
+                line,
+                "[y/Enter] Cancel job",
+                event.column,
+                event.row,
+            ) {
+                Some(KeyCode::Enter)
+            } else if centered_text_hit(
+                content,
+                content.y + 2,
+                line,
+                "[n/Esc] Keep running",
+                event.column,
+                event.row,
+            ) {
+                Some(KeyCode::Esc)
+            } else {
+                None
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            let popup = centered_rect(50, 24, area);
+            let content = bordered_inner(popup);
+            let line = "Enter save  •  Esc cancel";
+            if centered_text_hit(
+                content,
+                content.y + 3,
+                line,
+                "Enter save",
+                event.column,
+                event.row,
+            ) {
+                Some(KeyCode::Enter)
+            } else if centered_text_hit(
+                content,
+                content.y + 3,
+                line,
+                "Esc cancel",
+                event.column,
+                event.row,
+            ) {
+                Some(KeyCode::Esc)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    code.map_or(UiCommand::None, |code| app.handle_key(KeyEvent::from(code)))
+}
+
+fn setting_at(area: Rect, column: u16, row: u16) -> Option<ConfigField> {
+    if !contains(area, column, row) {
+        return None;
+    }
+    let index = row.checked_sub(area.y + 1)? as usize;
+    ConfigField::ALL.get(index).copied()
+}
+
+fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
+}
+
+fn footer_key_at(screen: Screen, area: Rect, column: u16, row: u16) -> Option<KeyCode> {
+    let line = footer_help(screen);
+    let options: &[(&str, KeyCode)] = match screen {
+        Screen::Configure => &[
+            ("Enter review", KeyCode::Enter),
+            ("? help", KeyCode::Char('?')),
+            ("q quit", KeyCode::Char('q')),
+        ],
+        Screen::Confirm => &[
+            ("Enter/y start", KeyCode::Enter),
+            ("Esc/n back", KeyCode::Esc),
+            ("q quit", KeyCode::Char('q')),
+        ],
+        Screen::Running => &[
+            ("x cancel", KeyCode::Char('x')),
+            ("q/Esc cancel menu", KeyCode::Esc),
+        ],
+        Screen::Result | Screen::Error => &[
+            ("Enter back to settings", KeyCode::Enter),
+            ("? help", KeyCode::Char('?')),
+            ("q quit", KeyCode::Char('q')),
+        ],
+    };
+    options.iter().find_map(|(label, code)| {
+        centered_text_hit(area, area.y, line, label, column, row).then_some(*code)
+    })
+}
+
+fn centered_text_hit(
+    area: Rect,
+    line_row: u16,
+    line: &str,
+    label: &str,
+    column: u16,
+    row: u16,
+) -> bool {
+    let Some(byte_offset) = line.find(label) else {
+        return false;
+    };
+    let mut rendered_width: u16 = 0;
+    for character in line.chars() {
+        let width = u16::try_from(character.width().unwrap_or(0)).unwrap_or(u16::MAX);
+        if rendered_width.saturating_add(width) > area.width {
+            break;
+        }
+        rendered_width += width;
+    }
+    let prefix_width = u16::try_from(line[..byte_offset].width()).unwrap_or(u16::MAX);
+    let label_width = u16::try_from(label.width()).unwrap_or(u16::MAX);
+    if prefix_width.saturating_add(label_width) > rendered_width {
+        return false;
+    }
+    let start = area.x + area.width / 2 - rendered_width / 2;
+    let label_start = start + prefix_width;
+    let label_end = label_start.saturating_add(label_width);
+    row == line_row && column >= label_start && column < label_end
+}
+
+fn bordered_inner(area: Rect) -> Rect {
+    Rect::new(
+        area.x.saturating_add(1),
+        area.y.saturating_add(1),
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    )
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -299,12 +529,7 @@ fn render_settings(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|(field, label, value, enabled)| setting_line(app, field, label, value, enabled))
         .collect::<Vec<_>>();
     lines.push(estimate_line(app));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(panel_block("SETTINGS"))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    frame.render_widget(Paragraph::new(lines).block(panel_block("SETTINGS")), area);
 }
 
 /// The predicted output size. Read-only, so it sits outside the focus ring and skips
@@ -687,24 +912,27 @@ fn render_error(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let help = match app.screen {
-        Screen::Configure => {
-            " Tab/↑↓ focus   ←→ adjust   i inputs   a add   o output   Enter review   ? help   q quit "
-        }
-        Screen::Confirm => " Enter/y start   Esc/n back   q quit ",
-        Screen::Running => " x cancel   q/Esc cancel menu ",
-        Screen::Result | Screen::Error => " Enter back to settings   ? help   q quit ",
-    };
     frame.render_widget(
-        Paragraph::new(help)
+        Paragraph::new(footer_help(app.screen))
             .style(Style::default().fg(MUTED).bg(PANEL))
             .alignment(Alignment::Center),
         area,
     );
 }
 
+fn footer_help(screen: Screen) -> &'static str {
+    match screen {
+        Screen::Configure => {
+            " Tab/↑↓ focus   ←→ adjust   i inputs   a add   o output   Enter review   ? help   q quit "
+        }
+        Screen::Confirm => " Enter/y start   Esc/n back   q quit ",
+        Screen::Running => " x cancel   q/Esc cancel menu ",
+        Screen::Result | Screen::Error => " Enter back to settings   ? help   q quit ",
+    }
+}
+
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
-    let popup = centered_rect(72, 70, area);
+    let popup = centered_rect(72, 80, area);
     frame.render_widget(Clear, popup);
     let text = vec![
         Line::styled(
@@ -722,6 +950,14 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::raw("x                   Cancel the run (stops the whole queue)"),
         Line::raw("q                   Quit (asks before cancelling)"),
         Line::raw("? / Esc             Close this help"),
+        Line::default(),
+        Line::styled(
+            "Mouse",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Line::raw("Left click          Activate a setting or the footer action"),
+        Line::raw("Wheel / right click Change a setting forward / backward"),
+        Line::raw("Input right / middle click   Add files / clear files"),
         Line::default(),
         Line::styled(
             "Several files share one set of settings and convert one after another.",
@@ -822,7 +1058,7 @@ pub fn format_duration(duration: Duration) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use crossterm::event::{KeyCode, KeyEvent};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
@@ -918,6 +1154,143 @@ mod tests {
         assert!(help.contains("Keyboard"));
         assert!(help.contains("Change the selected value"));
         assert!(help.contains("Video: 100–200000"));
+    }
+
+    #[test]
+    fn mouse_and_keyboard_share_the_settings_actions() {
+        let mut app = test_app();
+        let area = Rect::new(0, 0, 100, 30);
+        let settings = ui_layout(&app, area).settings;
+        let container_row = settings.y + 3;
+        let initial_container = app.draft.container;
+
+        handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: settings.x + 2,
+                row: container_row,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        );
+        assert_eq!(app.focus, ConfigField::Container);
+        assert_ne!(app.draft.container, initial_container);
+
+        let input_row = settings.y + 1;
+        let add = handle_mouse(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: settings.x + 2,
+                row: input_row,
+                modifiers: KeyModifiers::NONE,
+            },
+            area,
+        );
+        assert_eq!(add, UiCommand::OpenInputs { add: true });
+
+        app.focus = ConfigField::Input;
+        app.handle_key(KeyEvent::from(KeyCode::Down));
+        assert_eq!(app.focus, ConfigField::Output);
+    }
+
+    #[test]
+    fn mouse_only_activates_the_footer_and_popup_labels() {
+        let mut app = test_app();
+        let area = Rect::new(0, 0, 100, 30);
+        let footer = ui_layout(&app, area).footer;
+        app.screen = Screen::Confirm;
+        let confirm = render_text(&app, area.width, area.height);
+
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), footer.x, footer.y),
+            area,
+        );
+        assert_eq!(app.screen, Screen::Confirm);
+
+        let back = rendered_label_column(&confirm, footer.y, "Esc/n back");
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), back, footer.y),
+            area,
+        );
+        assert_eq!(app.screen, Screen::Configure);
+
+        app.draft.rate_control_mode = RateControlMode::Bitrate;
+        app.focus = ConfigField::RateValue;
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        let popup = centered_rect(50, 24, area);
+        let editing = render_text(&app, area.width, area.height);
+        handle_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                popup.x + 1,
+                popup.y + popup.height - 2,
+            ),
+            area,
+        );
+        assert!(app.numeric_edit_value().is_some());
+
+        let action_row = popup.y + 4;
+        let cancel = rendered_label_column(&editing, action_row, "Esc cancel");
+        handle_mouse(
+            &mut app,
+            mouse(MouseEventKind::Down(MouseButton::Left), cancel, action_row),
+            area,
+        );
+        assert!(app.numeric_edit_value().is_none());
+    }
+
+    #[test]
+    fn long_setting_values_stay_on_one_mouse_row() {
+        let mut app = test_app();
+        app.draft.output = Some(OutputTarget::File(PathBuf::from(
+            "/exports/a-very-long-folder-name/another-long-folder-name/output.mp4",
+        )));
+        let area = Rect::new(0, 0, 60, 24);
+        let settings = ui_layout(&app, area).settings;
+        let container_row = settings.y + 3;
+        let rendered = render_text(&app, area.width, area.height);
+        assert!(
+            rendered
+                .lines()
+                .nth(container_row as usize)
+                .is_some_and(|line| line.contains("Container")),
+            "{rendered}"
+        );
+
+        handle_mouse(
+            &mut app,
+            mouse(
+                MouseEventKind::Down(MouseButton::Left),
+                settings.x + 2,
+                container_row,
+            ),
+            area,
+        );
+        assert_eq!(app.focus, ConfigField::Container);
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn rendered_label_column(rendered: &str, row: u16, label: &str) -> u16 {
+        let line = rendered
+            .lines()
+            .nth(row as usize)
+            .expect("row should be rendered");
+        let offset = line.find(label).expect("label should be rendered");
+        u16::try_from(line[..offset].width())
+            .expect("label column should fit in a terminal coordinate")
     }
 
     #[test]

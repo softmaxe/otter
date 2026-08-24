@@ -89,7 +89,7 @@ pub enum ConfigField {
 }
 
 impl ConfigField {
-    const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Input,
         Self::Output,
         Self::Container,
@@ -881,7 +881,7 @@ impl App {
         self.queue.clear();
     }
 
-    fn prepare_confirmation(&mut self) {
+    pub(crate) fn prepare_confirmation(&mut self) {
         if self.draft.inputs.is_empty() {
             self.status_message = Some("Select at least one input file first.".to_owned());
             return;
