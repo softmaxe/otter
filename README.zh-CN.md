@@ -272,6 +272,10 @@ otter 不会通过 shell 执行预览命令。程序参数始终是独立的值�
 
 应用使用第一个视频流，以及可选的第一个音频流。
 
+## 许可证
+
+otter 使用 [GNU Affero General Public License v3](LICENSE)（`AGPL-3.0-or-later`）许可。
+
 ## 开发和验证
 
 运行格式检查、lint、单元测试、FFmpeg 集成测试和 release 构建：

@@ -274,6 +274,10 @@ Conversions run one at a time, from local files. The application does not includ
 
 The first video stream and optional first audio stream are used.
 
+## License
+
+otter is released under the [GNU Affero General Public License v3](LICENSE) (`AGPL-3.0-or-later`).
+
 ## Development and validation
 
 Run formatting, linting, unit tests, FFmpeg integration tests, and a release build:
