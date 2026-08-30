@@ -89,10 +89,10 @@ pub enum ToolError {
 }
 
 fn resolve_tool(override_name: &str, binary: &str) -> Option<PathBuf> {
-    if let Some(path) = env::var_os(override_name).map(PathBuf::from)
-        && path.is_file()
-    {
-        return Some(path);
+    if let Some(path) = env::var_os(override_name).map(PathBuf::from) {
+        if path.is_file() {
+            return Some(path);
+        }
     }
 
     if let Some(paths) = env::var_os("PATH") {

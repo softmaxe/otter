@@ -930,10 +930,10 @@ impl App {
     fn handle_numeric_key(&mut self, key: KeyEvent) -> UiCommand {
         match key.code {
             KeyCode::Char(character) if character.is_ascii_digit() => {
-                if let Some(edit) = self.numeric_edit.as_mut()
-                    && edit.buffer.len() < 6
-                {
-                    edit.buffer.push(character);
+                if let Some(edit) = self.numeric_edit.as_mut() {
+                    if edit.buffer.len() < 6 {
+                        edit.buffer.push(character);
+                    }
                 }
             }
             KeyCode::Backspace => {
