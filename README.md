@@ -2,13 +2,13 @@
 
 A macOS-first terminal interface for configuring and running FFmpeg transcodes — one file or a whole batch — without writing FFmpeg commands by hand.
 
-otter lets you choose one or many inputs with native file dialogs, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
+otter lets you choose one or many inputs with a built-in file picker, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
 
 ## Features
 
 - One file or many: select a batch and convert it with one set of settings
 - Per-file status while a batch runs, and a per-file summary when it ends
-- Native macOS Open and Save dialogs, with multiple selection for inputs
+- Built-in terminal file picker for video files and destination folders, working on every platform
 - MP4, MOV, Matroska (MKV), and WebM output
 - H.264, H.265, AV1, and VP9 video options where compatible
 - VideoToolbox hardware encoding for H.264 and H.265 on Apple silicon
@@ -63,24 +63,41 @@ The application must be run directly in an interactive terminal. Redirected stdi
 
 ## Workflow
 
-1. Press `i` and choose one or more input media files. Press `a` to add files from another folder, and `c` to clear the selection.
-2. Review the detected video, audio, duration, and dimensions per file.
-3. Press `o` to choose the final output path. One input asks for a file name; several ask for a destination folder.
-4. Move through settings with `Tab`, `Shift-Tab`, arrow keys, or `h`/`j`/`k`/`l`.
-5. Select a container, compatible codecs, resolution, and rate-control mode. They apply to every selected file.
-6. Press `Enter` to review the exact FFmpeg command, plus the list of files the batch would write.
-7. Press `Enter` or `y` to start.
-8. Watch progress and recent FFmpeg messages. Press `x` to open the cancellation confirmation.
+The interface is a five-step wizard: a bar of dots on top marks **Folders**, **Settings**, **Review**, **Progress**, and **Done**. One card shows the current step, with the way forward as a button on its bottom row.
+
+1. On **Folders**, press `i` and choose one or more input video files. Otter probes every selected file with FFprobe.
+2. Press `o` to choose the specific destination folder. Each input gets a derived output file inside that folder.
+3. On **Settings**, move through the container, codecs, resolution, rate control, and bitrate details with `Tab`, `Shift-Tab`, arrow keys, or `h`/`j`/`k`/`l`.
+4. Press `Enter` (or the `Review →` button) to see **Review**: the exact FFmpeg command plus the list of files the batch would write. `Start →` begins.
+5. Watch **Progress** and recent FFmpeg messages. **Done** reports the outcome, one line per file when the batch ran as a queue.
 
 Only one conversion runs at a time. A batch runs its files one after another, because FFmpeg already uses the whole machine for one encode.
 
-Mouse control is available alongside the keyboard shortcuts. Left-click a setting to activate it, use the wheel or right-click to move its value forward or backward, and left-click the footer to run the action shown there. On the Input row, right-click adds files and middle-click clears the selection.
+Mouse control is available throughout. Move the pointer over a row, button, header chip, status chip, or picker listing entry to highlight it. Hover is separate from keyboard focus. Left-click a setting or a card button, use the wheel or right-click to move a setting's value forward or backward, and click the chips on the header or status bar to run the key they stand for. In the file picker, left-click highlights a row, double-click confirms it, and the wheel scrolls the listing without changing the selected row.
+
+## File picker
+
+The input and output pickers are drawn by the application itself instead of a native dialog, so they behave the same on every platform. The picker is a modal card: the folder being visited sits on top, the listing fills the middle, and the buttons sit on the bottom row, `Cancel (esc)`, `Parent (←)`, and the mode's action on the right.
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` or `k` / `j` | Move between rows |
+| `Enter` | Open the highlighted folder, or choose a highlighted input file |
+| `Space` | Add or remove the highlighted input file |
+| `s` | Confirm the selected input files, or use the current output folder |
+| `Tab` | Focus the file name field (legacy output-file mode) |
+| `h` / `Left` / `Backspace` | Go to the parent folder |
+| `g` | Go to the home folder |
+| `.` | Toggle hidden files |
+| `Esc` | Close the picker without choosing anything |
+
+The input picker selects concrete files, supports multi-selection with `Space`, and passes every selected path to FFprobe. The picker does not guess whether a file is video from its extension. The output picker always selects a directory, including when only one input file is found.
 
 ## Batch conversion
 
 Every selected file is converted with the same settings, in the order it was selected.
 
-- Each output is named `<source name>.transcoded.<extension>` inside the chosen folder.
+- Each output is named `<source name>-transcode.<extension>` inside the chosen folder.
 - A file that ffprobe cannot read blocks the batch until it is removed from the selection, rather than being skipped silently.
 - Two inputs that would produce the same output name are refused before anything runs.
 - A file that fails to convert does not stop the ones behind it. The result screen lists every file with its outcome.
@@ -88,44 +105,56 @@ Every selected file is converted with the same settings, in the order it was sel
 
 ## Keyboard reference
 
-### Configure
+### Folders
+
+| Key | Action |
+| --- | --- |
+| `Tab` / `Down` | Move from input video files to output folder to Next |
+| `Up` / `Shift-Tab` | Move backward through the input, output, and Next controls |
+| `Enter` / `i` | Choose input video files |
+| `a` | Add more input video files |
+| `c` | Clear the selected input files |
+| `r` | Replace the selected input files |
+| `o` | Choose the output folder |
+| `?` | Show keyboard help |
+| `q` | Quit |
+
+### Settings
 
 | Key | Action |
 | --- | --- |
 | `Tab` / `Shift-Tab` | Move between settings |
 | `Up` / `Down` or `k` / `j` | Move between settings |
 | `Left` / `Right` or `h` / `l` | Change the selected value |
-| `i` | Choose input files, replacing the selection |
-| `a` | Add more input files to the selection |
-| `c` | Clear the selection |
-| `o` | Choose the output file or folder |
 | `r` | Probe the selected inputs again |
-| `Enter` | Edit a bitrate or review the command |
+| `Enter` | Edit a bitrate or open the review step |
 | `?` | Show keyboard help |
 | `q` | Quit |
 
-### Confirm
+### Review
 
 | Key | Action |
 | --- | --- |
+| `Up` / `Down`, `PageUp` / `PageDown`, `Home` / `End` | Scroll the full command and file mapping list |
 | `Enter` / `y` | Start conversion |
 | `Esc` / `n` | Return to settings |
 | `q` | Quit |
 
-### Running
+### Progress
 
 | Key | Action |
 | --- | --- |
+| `Up` / `Down`, `PageUp` / `PageDown`, `Home` / `End` | Scroll FFmpeg messages; `End` resumes following the latest output |
 | `x` / `Ctrl-C` | Open the cancellation confirmation |
 | `q` / `Esc` | Open the cancellation confirmation |
 | `y` / `Enter` | Confirm cancellation, stopping the rest of the batch |
 | `n` / `Esc` | Keep running |
 
-### Result or error
+### Done
 
 | Key | Action |
 | --- | --- |
-| `Enter` / `Esc` | Return to settings |
+| `Enter` / `Esc` | Return to folders |
 | `?` | Show keyboard help |
 | `q` | Quit |
 
@@ -232,9 +261,3 @@ cargo build --release
 ```
 
 The integration tests generate temporary synthetic media with FFmpeg. They skip when FFmpeg, FFprobe, `libx264`, or AAC is unavailable and do not access user media files. The VideoToolbox test additionally skips when the hardware encoders are missing.
-
-## File dialogs
-
-The Open and Save panels run in a short-lived helper process, re-executing this binary with a hidden `--file-dialog` argument. AppKit is never initialised inside the long-running TUI process.
-
-This is deliberate. An in-process panel leaves an invisible window behind at `CGShieldingWindowLevel`: its fade-out animation only completes while the process keeps pumping the AppKit run loop, which a TUI stops doing as soon as it returns to its own event loop. macOS then shows the spinning wait cursor over that region for the rest of the session. Ending the helper process removes the window with it.

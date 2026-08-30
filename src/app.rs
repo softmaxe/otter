@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, VecDeque},
-    ffi::OsStr,
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -10,14 +9,14 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
-    dialog::DialogRequest,
     domain::{
         AUDIO_BITRATE_PRESETS, AudioCodec, Container, DraftConfig, InputMedia, OutputTarget,
         QualityPreset, RateControlMode, Resolution, SizeEstimate, VIDEO_BITRATE_PRESETS,
-        estimate_queue_size, file_label, quality_setting, suggested_output_path,
-        supported_audio_codecs, supported_video_codecs,
+        estimate_queue_size, file_label, quality_setting, supported_audio_codecs,
+        supported_video_codecs,
     },
     media::probe_media,
+    picker::{Picker, PickerAction, PickerMode},
     toolchain::Toolchain,
     transcode::{
         OutputArtifact, ProgressUpdate, QueuedJob, TranscodeHandle, WorkerEvent,
@@ -27,7 +26,8 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    Configure,
+    Folders,
+    Settings,
     Confirm,
     Running,
     Result,
@@ -89,9 +89,7 @@ pub enum ConfigField {
 }
 
 impl ConfigField {
-    pub(crate) const ALL: [Self; 9] = [
-        Self::Input,
-        Self::Output,
+    pub(crate) const SETTINGS: [Self; 7] = [
         Self::Container,
         Self::VideoCodec,
         Self::AudioCodec,
@@ -100,6 +98,30 @@ impl ConfigField {
         Self::RateValue,
         Self::AudioBitrate,
     ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavigationButton {
+    Back,
+    Advance,
+}
+
+/// The control currently under the pointer. This state is deliberately kept
+/// separate from keyboard focus so moving the mouse never changes the action
+/// selected by the keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoverTarget {
+    HeaderChip(char),
+    StatusChip(char),
+    InputRow,
+    OutputRow,
+    Setting(ConfigField),
+    CardButton(NavigationButton),
+    PickerRow(usize),
+    PickerCancel,
+    PickerParent,
+    PickerPrimary,
+    PickerName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,17 +157,27 @@ pub struct App {
     /// Probe result per selected input, keyed by path. An input missing from the map
     /// is still being read.
     pub probes: HashMap<PathBuf, Result<InputMedia, String>>,
+    /// A previously used source folder, retained only as a picker start fallback
+    /// when no selected input provides a parent directory.
+    pub input_folder: Option<PathBuf>,
     pub screen: Screen,
     pub job: JobState,
     /// The planned conversions, filled in when a queue is prepared for confirmation
     /// and updated as it runs.
     pub queue: Vec<JobRecord>,
     pub focus: ConfigField,
+    pub button_focus: Option<NavigationButton>,
+    pub hover: Option<HoverTarget>,
     pub status_message: Option<String>,
     pub stderr_tail: VecDeque<String>,
+    pub review_scroll: u16,
+    pub progress_scroll: u16,
+    pub progress_follow: bool,
+    pub progress_scroll_from_top: bool,
     pub command_preview: Option<String>,
     pub help_visible: bool,
     pub cancel_confirmation: bool,
+    pub picker: Option<Picker>,
     numeric_edit: Option<NumericEdit>,
     prepared: Option<Vec<QueuedJob>>,
     transcode_handle: Option<TranscodeHandle>,
@@ -160,15 +192,23 @@ impl App {
             toolchain,
             draft: DraftConfig::default(),
             probes: HashMap::new(),
-            screen: Screen::Configure,
+            input_folder: None,
+            screen: Screen::Folders,
             job: JobState::Idle,
             queue: Vec::new(),
             focus: ConfigField::Input,
-            status_message: Some("Select one or more input files to begin.".to_owned()),
-            stderr_tail: VecDeque::with_capacity(20),
+            button_focus: None,
+            hover: None,
+            status_message: Some("Select one or more video files to begin.".to_owned()),
+            stderr_tail: VecDeque::new(),
+            review_scroll: 0,
+            progress_scroll: 0,
+            progress_follow: true,
+            progress_scroll_from_top: false,
             command_preview: None,
             help_visible: false,
             cancel_confirmation: false,
+            picker: None,
             numeric_edit: None,
             prepared: None,
             transcode_handle: None,
@@ -198,40 +238,75 @@ impl App {
     }
 
     pub fn select_output(&mut self, path: PathBuf) {
-        self.draft.output = Some(if self.draft.inputs.len() > 1 {
-            OutputTarget::Directory(path)
-        } else {
-            let mut path = path;
-            path.set_extension(self.draft.container.extension());
-            OutputTarget::File(path)
-        });
+        self.draft.output = Some(OutputTarget::Directory(path));
         self.invalidate_plan();
-        self.refresh_ready_message();
+        self.status_message = Some("Output folder selected. Press Tab to continue.".to_owned());
     }
 
-    /// The dialog that matches the current selection: one destination file for a
-    /// single input, a destination folder for a queue.
-    pub fn output_dialog_request(&self) -> DialogRequest {
-        let target = self.draft.output.as_ref();
-        if self.draft.inputs.len() > 1 {
-            return DialogRequest::ChooseOutputFolder {
-                directory: target
-                    .filter(|target| target.is_directory())
-                    .map(|target| target.path().to_owned())
-                    .or_else(|| self.first_input_directory()),
-            };
-        }
-        let file = match target {
-            Some(OutputTarget::File(path)) => Some(path),
-            _ => None,
+    /// The output picker always chooses a directory, even for one input file.
+    pub fn output_picker_info(&self) -> (Option<PathBuf>, Option<String>) {
+        let directory = self
+            .draft
+            .output
+            .as_ref()
+            .filter(|target| target.is_directory())
+            .map(|target| target.path().to_owned())
+            .or_else(|| self.input_folder.clone())
+            .or_else(|| self.first_input_directory())
+            .or_else(picker_home_dir);
+        (directory, None)
+    }
+
+    /// Opens the input-file picker. The first input's parent is the most useful
+    /// starting directory when a selection already exists.
+    pub fn open_inputs_picker(&mut self, add: bool) {
+        let start = self
+            .first_input_directory()
+            .or_else(|| self.input_folder.clone())
+            .or_else(picker_home_dir)
+            .or_else(|| std::env::current_dir().ok());
+        let Some(start) = start else { return };
+        self.hover = None;
+        self.picker = Some(Picker::open(PickerMode::InputFiles, start, None, add));
+    }
+
+    /// Opens the output-folder picker.
+    pub fn open_output_picker(&mut self) {
+        let (directory, _) = self.output_picker_info();
+        let start = directory.unwrap_or_else(|| PathBuf::from("."));
+        self.hover = None;
+        self.picker = Some(Picker::open(PickerMode::OutputFolder, start, None, false));
+    }
+
+    /// Applies the picker's decision and drops it. An empty input selection is
+    /// treated as a dismissal: leaving the picker must never clear the queue.
+    pub(crate) fn close_picker(&mut self, action: PickerAction) -> UiCommand {
+        let Some(picker) = self.picker.take() else {
+            return UiCommand::None;
         };
-        DialogRequest::SaveOutput {
-            directory: file.and_then(|path| path.parent()).map(ToOwned::to_owned),
-            file_name: file
-                .and_then(|path| path.file_name())
-                .and_then(OsStr::to_str)
-                .map(ToOwned::to_owned),
+        match action {
+            PickerAction::None => {
+                self.picker = Some(picker);
+            }
+            PickerAction::Cancel => {}
+            PickerAction::Done(paths) => match picker.mode {
+                PickerMode::InputFiles if !paths.is_empty() => {
+                    if picker.append {
+                        self.add_inputs(paths);
+                    } else {
+                        self.select_inputs(paths);
+                    }
+                }
+                PickerMode::OutputFile | PickerMode::OutputFolder => {
+                    if let Some(path) = paths.into_iter().next() {
+                        self.select_output(path);
+                    }
+                }
+                PickerMode::InputFolder => {}
+                PickerMode::InputFiles => {}
+            },
         }
+        UiCommand::None
     }
 
     /// Surfaces a failure that happened outside the app state machine.
@@ -255,6 +330,14 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> UiCommand {
+        if self.picker.is_some() {
+            let action = self
+                .picker
+                .as_mut()
+                .map(|picker| picker.handle_key(key))
+                .unwrap_or(PickerAction::None);
+            return self.close_picker(action);
+        }
         if self.help_visible {
             if matches!(
                 key.code,
@@ -269,12 +352,15 @@ impl App {
         }
 
         match self.screen {
-            Screen::Configure => self.handle_configure_key(key),
+            Screen::Folders => self.handle_folders_key(key),
+            Screen::Settings => self.handle_settings_key(key),
             Screen::Confirm => self.handle_confirm_key(key),
             Screen::Running => self.handle_running_key(key),
             Screen::Result | Screen::Error => match key.code {
                 KeyCode::Enter | KeyCode::Esc => {
-                    self.screen = Screen::Configure;
+                    self.screen = Screen::Folders;
+                    self.focus = ConfigField::Input;
+                    self.button_focus = None;
                     self.job = self.settled_job_state();
                     self.queue.clear();
                     self.stderr_tail.clear();
@@ -439,7 +525,7 @@ impl App {
             .collect();
         if self.draft.inputs.is_empty() {
             self.job = JobState::Idle;
-            self.status_message = Some("Select one or more input files to begin.".to_owned());
+            self.status_message = Some("Select one or more video files to begin.".to_owned());
             return;
         }
         if pending.is_empty() {
@@ -452,21 +538,18 @@ impl App {
         self.spawn_probes(pending);
     }
 
-    /// One input writes to a file named after it; several write into a folder. An
-    /// explicit folder the user already chose survives further additions.
+    /// Every input writes a matching file into one destination directory.
     fn refresh_output_target(&mut self) {
         self.draft.output = match self.draft.inputs.as_slice() {
             [] => None,
-            [input] => Some(OutputTarget::File(suggested_output_path(
-                input,
-                self.draft.container,
-            ))),
             [first, ..] => match self.draft.output.take() {
                 Some(target) if target.is_directory() => Some(target),
                 _ => Some(OutputTarget::Directory(
                     first
                         .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
                         .map(ToOwned::to_owned)
+                        .or_else(|| self.input_folder.clone())
                         .unwrap_or_else(|| PathBuf::from(".")),
                 )),
             },
@@ -478,7 +561,13 @@ impl App {
             .inputs
             .first()
             .and_then(|input| input.parent())
-            .map(ToOwned::to_owned)
+            .map(|parent| {
+                if parent.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    parent.to_owned()
+                }
+            })
     }
 
     /// Reads the queued files one after another. ffprobe is cheap, but a folder full
@@ -524,6 +613,9 @@ impl App {
             WorkerEvent::Started { index, pid } => {
                 // Messages belong to the file that produced them.
                 self.stderr_tail.clear();
+                self.progress_scroll = 0;
+                self.progress_follow = true;
+                self.progress_scroll_from_top = false;
                 self.set_outcome(index, JobOutcome::Running);
                 if !matches!(self.job, JobState::Cancelling) {
                     self.job = JobState::Running {
@@ -556,9 +648,6 @@ impl App {
                 }
             }
             WorkerEvent::StderrLine { line, .. } => {
-                if self.stderr_tail.len() == 20 {
-                    self.stderr_tail.pop_front();
-                }
                 self.stderr_tail.push_back(line);
             }
             WorkerEvent::Finished {
@@ -626,7 +715,7 @@ impl App {
         };
     }
 
-    fn handle_configure_key(&mut self, key: KeyEvent) -> UiCommand {
+    fn handle_folders_key(&mut self, key: KeyEvent) -> UiCommand {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return UiCommand::Quit;
         }
@@ -640,46 +729,98 @@ impl App {
             KeyCode::Char('a') => UiCommand::OpenInputs { add: true },
             KeyCode::Char('c') => {
                 self.select_inputs(Vec::new());
+                self.input_folder = None;
                 UiCommand::None
             }
             KeyCode::Char('o') => UiCommand::OpenOutput,
+            KeyCode::Char('r') => UiCommand::OpenInputs { add: false },
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
+                self.move_folder_focus(1);
+                UiCommand::None
+            }
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => {
+                self.move_folder_focus(-1);
+                UiCommand::None
+            }
+            KeyCode::Enter => match self.button_focus {
+                Some(NavigationButton::Advance) => {
+                    self.leave_folders();
+                    UiCommand::None
+                }
+                _ => match self.focus {
+                    ConfigField::Input => UiCommand::OpenInputs { add: false },
+                    ConfigField::Output => UiCommand::OpenOutput,
+                    _ => UiCommand::None,
+                },
+            },
+            _ => UiCommand::None,
+        }
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) -> UiCommand {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return UiCommand::Quit;
+        }
+        match key.code {
+            KeyCode::Char('q') => UiCommand::Quit,
+            KeyCode::Char('?') => {
+                self.help_visible = true;
+                UiCommand::None
+            }
             KeyCode::Char('r') => {
                 self.reprobe_inputs();
                 UiCommand::None
             }
+            KeyCode::Esc => {
+                self.screen = Screen::Folders;
+                self.focus = ConfigField::Output;
+                self.button_focus = None;
+                UiCommand::None
+            }
             KeyCode::Tab | KeyCode::Down | KeyCode::Char('j') => {
-                self.move_focus(1);
+                self.move_settings_focus(1);
                 UiCommand::None
             }
             KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k') => {
-                self.move_focus(-1);
+                self.move_settings_focus(-1);
                 UiCommand::None
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                self.adjust_focused(-1);
+                if self.button_focus.is_none() {
+                    self.adjust_focused(-1);
+                }
                 UiCommand::None
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                self.adjust_focused(1);
+                if self.button_focus.is_none() {
+                    self.adjust_focused(1);
+                }
                 UiCommand::None
             }
-            KeyCode::Enter => match self.focus {
-                ConfigField::Input => UiCommand::OpenInputs { add: false },
-                ConfigField::Output => UiCommand::OpenOutput,
-                ConfigField::RateValue
-                    if self.draft.rate_control_mode == RateControlMode::Bitrate =>
-                {
-                    self.begin_numeric_edit();
+            KeyCode::Enter => match self.button_focus {
+                Some(NavigationButton::Back) => {
+                    self.screen = Screen::Folders;
+                    self.focus = ConfigField::Output;
+                    self.button_focus = None;
                     UiCommand::None
                 }
-                ConfigField::AudioBitrate if self.audio_bitrate_enabled() => {
-                    self.begin_numeric_edit();
-                    UiCommand::None
-                }
-                _ => {
+                Some(NavigationButton::Advance) => {
                     self.prepare_confirmation();
                     UiCommand::None
                 }
+                None => match self.focus {
+                    ConfigField::RateValue
+                        if self.draft.rate_control_mode == RateControlMode::Bitrate =>
+                    {
+                        self.begin_numeric_edit();
+                        UiCommand::None
+                    }
+                    ConfigField::AudioBitrate if self.audio_bitrate_enabled() => {
+                        self.begin_numeric_edit();
+                        UiCommand::None
+                    }
+                    _ => UiCommand::None,
+                },
             },
             _ => UiCommand::None,
         }
@@ -687,13 +828,38 @@ impl App {
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> UiCommand {
         match key.code {
+            KeyCode::Up => {
+                self.scroll_review_up(1);
+                UiCommand::None
+            }
+            KeyCode::Down => {
+                self.review_scroll = self.review_scroll.saturating_add(1);
+                UiCommand::None
+            }
+            KeyCode::PageUp => {
+                self.scroll_review_up(8);
+                UiCommand::None
+            }
+            KeyCode::PageDown => {
+                self.review_scroll = self.review_scroll.saturating_add(8);
+                UiCommand::None
+            }
+            KeyCode::Home => {
+                self.review_scroll = 0;
+                UiCommand::None
+            }
+            KeyCode::End => {
+                self.review_scroll = u16::MAX;
+                UiCommand::None
+            }
             KeyCode::Enter | KeyCode::Char('y') => {
                 self.start_prepared();
                 UiCommand::None
             }
             KeyCode::Esc | KeyCode::Char('n') => {
                 self.invalidate_plan();
-                self.screen = Screen::Configure;
+                self.screen = Screen::Settings;
+                self.button_focus = Some(NavigationButton::Advance);
                 UiCommand::None
             }
             KeyCode::Char('q') => UiCommand::Quit,
@@ -710,12 +876,55 @@ impl App {
             }
             return UiCommand::None;
         }
+        match key.code {
+            KeyCode::Up => self.scroll_progress_up(1),
+            KeyCode::Down => self.scroll_progress_down(1),
+            KeyCode::PageUp => self.scroll_progress_up(8),
+            KeyCode::PageDown => self.scroll_progress_down(8),
+            KeyCode::Home => {
+                self.progress_scroll = 0;
+                self.progress_follow = false;
+                self.progress_scroll_from_top = true;
+            }
+            KeyCode::End => {
+                self.progress_scroll = 0;
+                self.progress_follow = true;
+                self.progress_scroll_from_top = false;
+            }
+            _ => {}
+        }
         if (key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c'))
             || matches!(key.code, KeyCode::Char('x' | 'q') | KeyCode::Esc)
         {
             self.cancel_confirmation = true;
         }
         UiCommand::None
+    }
+
+    pub fn scroll_review_up(&mut self, amount: u16) {
+        self.review_scroll = self.review_scroll.saturating_sub(amount);
+    }
+
+    pub fn scroll_progress_up(&mut self, amount: u16) {
+        self.progress_scroll = if self.progress_follow {
+            amount
+        } else if self.progress_scroll_from_top {
+            self.progress_scroll.saturating_sub(amount)
+        } else {
+            self.progress_scroll.saturating_add(amount)
+        };
+        self.progress_follow = false;
+    }
+
+    pub fn scroll_progress_down(&mut self, amount: u16) {
+        if self.progress_scroll_from_top {
+            self.progress_scroll = self.progress_scroll.saturating_add(amount);
+        } else {
+            self.progress_scroll = self.progress_scroll.saturating_sub(amount);
+        }
+        if !self.progress_scroll_from_top && self.progress_scroll == 0 {
+            self.progress_follow = true;
+        }
     }
 
     fn handle_numeric_key(&mut self, key: KeyEvent) -> UiCommand {
@@ -782,20 +991,69 @@ impl App {
         }
     }
 
-    fn move_focus(&mut self, direction: i32) {
-        let current = ConfigField::ALL
-            .iter()
-            .position(|field| *field == self.focus)
-            .unwrap_or(0);
-        for offset in 1..=ConfigField::ALL.len() {
-            let index = (current as i32 + direction * offset as i32)
-                .rem_euclid(ConfigField::ALL.len() as i32) as usize;
-            let candidate = ConfigField::ALL[index];
-            if self.field_enabled(candidate) {
-                self.focus = candidate;
+    fn move_folder_focus(&mut self, direction: i32) {
+        let current = match self.button_focus {
+            Some(NavigationButton::Advance) => 2,
+            _ if self.focus == ConfigField::Output => 1,
+            _ => 0,
+        };
+        let next = (current + direction).rem_euclid(3);
+        match next {
+            0 => {
+                self.focus = ConfigField::Input;
+                self.button_focus = None;
+            }
+            1 => {
+                self.focus = ConfigField::Output;
+                self.button_focus = None;
+            }
+            _ => self.button_focus = Some(NavigationButton::Advance),
+        }
+    }
+
+    fn move_settings_focus(&mut self, direction: i32) {
+        let count = ConfigField::SETTINGS.len() + 2;
+        let current = match self.button_focus {
+            Some(NavigationButton::Back) => ConfigField::SETTINGS.len(),
+            Some(NavigationButton::Advance) => ConfigField::SETTINGS.len() + 1,
+            None => ConfigField::SETTINGS
+                .iter()
+                .position(|field| *field == self.focus)
+                .unwrap_or(0),
+        };
+        for offset in 1..=count {
+            let index =
+                (current as i32 + direction * offset as i32).rem_euclid(count as i32) as usize;
+            if index < ConfigField::SETTINGS.len() {
+                let candidate = ConfigField::SETTINGS[index];
+                if self.field_enabled(candidate) {
+                    self.focus = candidate;
+                    self.button_focus = None;
+                    return;
+                }
+            } else if index == ConfigField::SETTINGS.len() {
+                self.button_focus = Some(NavigationButton::Back);
+                return;
+            } else {
+                self.button_focus = Some(NavigationButton::Advance);
                 return;
             }
         }
+    }
+
+    pub(crate) fn leave_folders(&mut self) {
+        if self.draft.inputs.is_empty() {
+            self.status_message = Some("Select one or more video files first.".to_owned());
+            return;
+        }
+        if !matches!(self.draft.output, Some(OutputTarget::Directory(_))) {
+            self.status_message = Some("Select an output folder first.".to_owned());
+            return;
+        }
+        self.screen = Screen::Settings;
+        self.focus = ConfigField::Container;
+        self.button_focus = None;
+        self.status_message = Some("Choose encoding settings, then review.".to_owned());
     }
 
     fn field_enabled(&self, field: ConfigField) -> bool {
@@ -883,7 +1141,11 @@ impl App {
 
     pub(crate) fn prepare_confirmation(&mut self) {
         if self.draft.inputs.is_empty() {
-            self.status_message = Some("Select at least one input file first.".to_owned());
+            self.status_message = Some("Select one or more video files first.".to_owned());
+            return;
+        }
+        if !matches!(self.draft.output, Some(OutputTarget::Directory(_))) {
+            self.status_message = Some("Select an output folder first.".to_owned());
             return;
         }
         if !self.all_probed() {
@@ -939,15 +1201,20 @@ impl App {
         self.command_preview = preview;
         self.queue = records;
         self.prepared = Some(jobs);
+        self.review_scroll = 0;
         self.screen = Screen::Confirm;
+        self.button_focus = Some(NavigationButton::Advance);
     }
 
     fn start_prepared(&mut self) {
         let Some(jobs) = self.prepared.take() else {
-            self.screen = Screen::Configure;
+            self.screen = Screen::Settings;
             return;
         };
         self.stderr_tail.clear();
+        self.progress_scroll = 0;
+        self.progress_follow = true;
+        self.progress_scroll_from_top = false;
         self.screen = Screen::Running;
         self.job = JobState::Starting;
         self.status_message = Some(match self.queue.as_slice() {
@@ -1005,6 +1272,12 @@ fn probing_message(remaining: usize) -> String {
         0 | 1 => "Probing input media…".to_owned(),
         count => format!("Probing input media… {count} files left."),
     }
+}
+
+/// Where the pickers land when there is nothing to go on yet.
+fn picker_home_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    (!home.is_empty()).then(|| PathBuf::from(home))
 }
 
 fn cycle<T: Copy + PartialEq>(values: &[T], current: T, direction: i32) -> T {
@@ -1077,17 +1350,81 @@ mod tests {
         assert_eq!(cycle(&Container::ALL, Container::Mp4, -1), Container::WebM);
     }
 
-    /// A single input keeps the file-shaped destination it has always had; adding a
-    /// second one moves the queue into a folder instead.
+    #[test]
+    fn opening_the_input_picker_lands_in_the_last_held_folder() {
+        let mut app = App::new(Toolchain::test_fixture());
+        app.open_inputs_picker(false);
+        let picker = app.picker.as_ref().expect("the picker should open");
+        assert_eq!(picker.mode, PickerMode::InputFiles);
+        assert!(!picker.rows.is_empty());
+    }
+
+    #[test]
+    fn input_picker_uses_first_input_parent_before_the_saved_folder() {
+        let first = tempfile::tempdir().unwrap();
+        let saved = tempfile::tempdir().unwrap();
+        let input = first.path().join("clip.mov");
+        std::fs::write(&input, b"").unwrap();
+
+        let mut app = App::new(Toolchain::test_fixture());
+        app.input_folder = Some(saved.path().to_owned());
+        app.draft.inputs = vec![input.clone()];
+        app.open_inputs_picker(false);
+
+        let picker = app.picker.as_ref().expect("the picker should open");
+        assert_eq!(picker.mode, PickerMode::InputFiles);
+        assert_eq!(picker.dir, first.path());
+    }
+
+    #[test]
+    fn input_picker_replaces_or_appends_concrete_files() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.mov");
+        let second = root.path().join("second.mov");
+        let third = root.path().join("third.mov");
+        for path in [&first, &second, &third] {
+            std::fs::write(path, b"").unwrap();
+        }
+
+        let mut app = App::new(Toolchain::test_fixture());
+        app.picker = Some(Picker::open(
+            PickerMode::InputFiles,
+            root.path().to_owned(),
+            None,
+            false,
+        ));
+        app.close_picker(PickerAction::Done(vec![first.clone(), second.clone()]));
+        assert_eq!(app.draft.inputs, vec![first.clone(), second.clone()]);
+
+        app.picker = Some(Picker::open(
+            PickerMode::InputFiles,
+            root.path().to_owned(),
+            None,
+            true,
+        ));
+        app.close_picker(PickerAction::Done(vec![third.clone(), second.clone()]));
+        assert_eq!(app.draft.inputs, vec![first, second, third]);
+    }
+
+    #[test]
+    fn opening_the_input_picker_preserves_the_add_flag() {
+        let mut app = App::new(Toolchain::test_fixture());
+
+        app.open_inputs_picker(false);
+        assert!(!app.picker.as_ref().unwrap().append);
+
+        app.open_inputs_picker(true);
+        assert!(app.picker.as_ref().unwrap().append);
+    }
+
+    /// Every input writes a derived file into the selected destination folder.
     #[test]
     fn output_target_follows_the_size_of_the_selection() {
         let mut app = App::new(Toolchain::test_fixture());
         app.select_inputs(vec![PathBuf::from("/media/clips/a.mov")]);
         assert_eq!(
             app.draft.output,
-            Some(OutputTarget::File(PathBuf::from(
-                "/media/clips/a.transcoded.mp4"
-            )))
+            Some(OutputTarget::Directory(PathBuf::from("/media/clips")))
         );
 
         app.add_inputs(vec![PathBuf::from("/media/clips/b.mov")]);
@@ -1097,7 +1434,7 @@ mod tests {
         );
         assert_eq!(
             app.draft.output_path_for(Path::new("/media/clips/b.mov")),
-            Some(PathBuf::from("/media/clips/b.transcoded.mp4"))
+            Some(PathBuf::from("/media/clips/b-transcode.mp4"))
         );
 
         // A folder the user chose survives further additions.
@@ -1250,5 +1587,133 @@ mod tests {
         });
 
         assert_eq!(app.screen, Screen::Error);
+    }
+
+    /// Closing the input picker selects concrete files, and a dismissal changes nothing.
+    #[test]
+    fn picker_results_flow_into_input_files() {
+        let mut app = App::new(Toolchain::test_fixture());
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("b.mov"), b"").unwrap();
+        std::fs::write(root.path().join("a.mov"), b"").unwrap();
+        app.open_inputs_picker(false);
+        app.picker = Some(Picker::open(
+            PickerMode::InputFiles,
+            root.path().to_owned(),
+            None,
+            false,
+        ));
+        app.close_picker(PickerAction::Cancel);
+        assert!(app.picker.is_none());
+        app.picker = Some(Picker::open(
+            PickerMode::InputFiles,
+            root.path().to_owned(),
+            None,
+            false,
+        ));
+        app.close_picker(PickerAction::Done(vec![
+            root.path().join("a.mov"),
+            root.path().join("b.mov"),
+        ]));
+        assert_eq!(
+            app.draft.inputs,
+            vec![root.path().join("a.mov"), root.path().join("b.mov")]
+        );
+    }
+
+    /// The output picker always reports a destination directory.
+    #[test]
+    fn output_picker_info_matches_the_selection_shape() {
+        let mut app = App::new(Toolchain::test_fixture());
+        app.select_inputs(vec![PathBuf::from("/media/clips/a.mov")]);
+
+        let (directory, file_name) = app.output_picker_info();
+        assert_eq!(directory.as_deref(), Some(Path::new("/media/clips")));
+        assert!(file_name.is_none());
+
+        app.add_inputs(vec![PathBuf::from("/media/clips/b.mov")]);
+        let (directory, file_name) = app.output_picker_info();
+        assert_eq!(directory.as_deref(), Some(Path::new("/media/clips")));
+        assert!(file_name.is_none());
+
+        // The mode stays a folder even for one input.
+        app.select_inputs(vec![PathBuf::from("/media/clips/a.mov")]);
+        app.open_output_picker();
+        assert_eq!(app.picker.as_ref().unwrap().mode, PickerMode::OutputFolder);
+    }
+
+    #[test]
+    fn a_saved_output_folder_lands_in_the_app() {
+        let mut app = App::new(Toolchain::test_fixture());
+        app.select_inputs(vec![PathBuf::from("/media/clips/a.mov")]);
+        app.open_output_picker();
+        app.close_picker(PickerAction::Done(vec![PathBuf::from(
+            "/media/clips/exports",
+        )]));
+        assert_eq!(
+            app.draft.output,
+            Some(OutputTarget::Directory(PathBuf::from(
+                "/media/clips/exports"
+            )))
+        );
+    }
+
+    #[test]
+    fn folders_gate_settings_and_done_returns_to_folders() {
+        let mut app = App::new(Toolchain::test_fixture());
+
+        app.leave_folders();
+        assert_eq!(app.screen, Screen::Folders);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Select one or more video files first.")
+        );
+
+        app.input_folder = Some(PathBuf::from("/media/clips"));
+        app.draft.inputs = vec![PathBuf::from("/media/clips/a.mov")];
+        app.leave_folders();
+        assert_eq!(app.screen, Screen::Folders);
+        assert_eq!(
+            app.status_message.as_deref(),
+            Some("Select an output folder first.")
+        );
+
+        app.draft.output = Some(OutputTarget::Directory(PathBuf::from("/exports")));
+        app.leave_folders();
+        assert_eq!(app.screen, Screen::Settings);
+        assert_eq!(app.focus, ConfigField::Container);
+
+        app.screen = Screen::Confirm;
+        app.handle_key(KeyEvent::from(KeyCode::Esc));
+        assert_eq!(app.screen, Screen::Settings);
+
+        app.screen = Screen::Result;
+        app.handle_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(app.screen, Screen::Folders);
+        assert_eq!(app.focus, ConfigField::Input);
+    }
+
+    #[test]
+    fn stderr_keeps_every_line_for_the_current_file_and_clears_on_start() {
+        let mut app = App::new(Toolchain::test_fixture());
+        for index in 0..25 {
+            app.handle_worker_event(WorkerEvent::StderrLine {
+                index: 0,
+                line: format!("message-{index}"),
+            });
+        }
+
+        assert_eq!(app.stderr_tail.len(), 25);
+        assert_eq!(
+            app.stderr_tail.front().map(String::as_str),
+            Some("message-0")
+        );
+        assert_eq!(
+            app.stderr_tail.back().map(String::as_str),
+            Some("message-24")
+        );
+
+        app.handle_worker_event(WorkerEvent::Started { index: 1, pid: 42 });
+        assert!(app.stderr_tail.is_empty());
     }
 }

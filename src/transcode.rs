@@ -361,6 +361,18 @@ fn run_queue(
 
 /// Runs one job to completion. Returns `true` when it was cancelled, which ends the
 /// queue.
+fn sanitize_stderr_line(line: &str) -> String {
+    let mut sanitized = String::new();
+    for character in line.chars().take(2_000) {
+        if character == '\t' {
+            sanitized.push_str("    ");
+        } else if !character.is_control() {
+            sanitized.push(character);
+        }
+    }
+    sanitized
+}
+
 fn run_job(
     index: usize,
     job: QueuedJob,
@@ -410,14 +422,9 @@ fn run_job(
     let stderr_thread = thread::spawn(move || {
         if let Some(stderr) = stderr {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let sanitized: String = line
-                    .chars()
-                    .filter(|character| !character.is_control() || *character == '\t')
-                    .take(2_000)
-                    .collect();
                 let _ = stderr_tx.send(WorkerEvent::StderrLine {
                     index,
-                    line: sanitized,
+                    line: sanitize_stderr_line(&line),
                 });
             }
         }
@@ -528,6 +535,22 @@ mod tests {
             video_rate_control: rate,
             audio_bitrate_kbps: 192,
         }
+    }
+
+    #[test]
+    fn stderr_sanitization_expands_tabs_and_removes_control_characters() {
+        let sanitized = sanitize_stderr_line(
+            "Svt[info]:\tSVT [config]:\twidth / height\t:\t3840 / 2160\u{1b}\r\u{7}",
+        );
+
+        assert_eq!(
+            sanitized,
+            "Svt[info]:    SVT [config]:    width / height    :    3840 / 2160"
+        );
+        assert!(
+            sanitized.chars().all(|character| !character.is_control()),
+            "sanitized stderr retained a control character: {sanitized:?}"
+        );
     }
 
     #[test]

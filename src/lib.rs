@@ -1,8 +1,9 @@
 pub mod app;
-pub mod dialog;
 pub mod domain;
 pub mod media;
+pub mod picker;
 pub mod terminal;
+pub mod theme;
 pub mod toolchain;
 pub mod transcode;
 pub mod ui;

@@ -838,7 +838,7 @@ pub fn suggested_output_name(input: &Path, container: Container) -> String {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("output");
-    format!("{stem}.transcoded.{}", container.extension())
+    format!("{stem}-transcode.{}", container.extension())
 }
 
 pub fn suggested_output_path(input: &Path, container: Container) -> PathBuf {
@@ -873,12 +873,12 @@ mod tests {
 
         assert_eq!(
             draft.output_path_for(Path::new("/media/one.mov")),
-            Some(PathBuf::from("/exports/one.transcoded.mkv"))
+            Some(PathBuf::from("/exports/one-transcode.mkv"))
         );
         // Sources from different folders keep their own names in the destination.
         assert_eq!(
             draft.output_path_for(Path::new("/archive/two.mkv")),
-            Some(PathBuf::from("/exports/two.transcoded.mkv"))
+            Some(PathBuf::from("/exports/two-transcode.mkv"))
         );
     }
 
@@ -933,7 +933,7 @@ mod tests {
     fn an_output_may_not_land_on_another_queued_input() {
         let directory = tempfile::tempdir().expect("temporary directory should be created");
         let first = directory.path().join("clip.mov");
-        let second = directory.path().join("clip.transcoded.mp4");
+        let second = directory.path().join("clip-transcode.mp4");
         std::fs::write(&first, b"test").unwrap();
         let draft = DraftConfig {
             inputs: vec![first.clone(), second.clone()],
@@ -1530,10 +1530,10 @@ mod tests {
             std::path::Path::new("/tmp/My Clip.mov"),
             Container::Matroska,
         );
-        assert_eq!(mkv_output, PathBuf::from("/tmp/My Clip.transcoded.mkv"));
+        assert_eq!(mkv_output, PathBuf::from("/tmp/My Clip-transcode.mkv"));
 
         let mov_output =
             suggested_output_path(std::path::Path::new("/tmp/My Clip.mp4"), Container::Mov);
-        assert_eq!(mov_output, PathBuf::from("/tmp/My Clip.transcoded.mov"));
+        assert_eq!(mov_output, PathBuf::from("/tmp/My Clip-transcode.mov"));
     }
 }

@@ -454,8 +454,8 @@ fn transcodes_a_queue_of_several_files_into_one_folder() {
             .map(|config| &config.output)
             .collect::<Vec<_>>(),
         vec![
-            &exports.join("source with audio.transcoded.mov"),
-            &exports.join("silent source.transcoded.mov"),
+            &exports.join("source with audio-transcode.mov"),
+            &exports.join("silent source-transcode.mov"),
         ]
     );
 
