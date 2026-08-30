@@ -21,10 +21,10 @@ otter lets you choose one or many inputs with a built-in file picker, select com
 
 - One file or many: select a batch and convert it with one set of settings
 - Per-file status while a batch runs, and a per-file summary when it ends
-- Built-in terminal file picker for video files and destination folders, working on every platform
+- Built-in terminal file picker for video files and destination folders, drawn by the app itself instead of a native dialog
 - MP4, MOV, Matroska (MKV), and WebM output
 - H.264, H.265, AV1, and VP9 video options where compatible
-- VideoToolbox hardware encoding for H.264 and H.265 on Apple silicon
+- VideoToolbox hardware encoding for H.264 and H.265 when the installed FFmpeg provides it
 - AAC, Opus, MP3, or disabled audio where compatible
 - Source, 2160p, 1440p, 1080p, 720p, and 480p resolution presets
 - Video quality presets using codec-specific constant-quality values
@@ -32,10 +32,10 @@ otter lets you choose one or many inputs with a built-in file picker, select com
 - Audio bitrate presets and custom values
 - Estimated output size for the whole selection, accurate to a few percent in
   target-bitrate mode and marked `(rough)` under constant quality
-- Shell-safe command preview before execution
+- Shell-quoted command preview before execution
 - Live processed time, percentage, speed, and recent FFmpeg messages
-- Graceful cancellation with automatic temporary-output cleanup, which also stops
-  the rest of the batch
+- Cancelling stops the running conversion, removes its temporary output, and
+  leaves the rest of the batch unstarted
 - Refusal to overwrite an existing output file
 
 ## Installation
@@ -292,8 +292,8 @@ The integration tests generate temporary synthetic media with FFmpeg. They skip 
 Run the **Release** workflow manually to test both macOS packages without publishing a GitHub Release. To publish, first set `package.version` in `Cargo.toml`, then create and push the matching three-part version tag:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 The workflow tests and packages native Apple silicon and Intel binaries, publishes both archives with `SHA256SUMS`, then updates `Formula/otter.rb` in `softmaxe/homebrew-tap`. The `bump-tap` job requires an Actions secret named `OTTER_HOMEBREW_TAP_UPDATER` with write access to that repository.

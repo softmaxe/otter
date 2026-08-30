@@ -21,10 +21,10 @@ otter 内置文件选择器，可选择一个或多个输入文件。你可以�
 
 - 支持单个或多个文件，整批文件共用一套设置
 - 批量运行时显示每个文件的状态，结束后显示逐文件摘要
-- 内置终端文件选择器，可选择视频文件和目标文件夹，并能在所有平台上工作
+- 内置终端文件选择器，可选择视频文件和目标文件夹，由应用自身绘制，不使用原生对话框
 - 支持 MP4、MOV、Matroska（MKV）和 WebM 输出
 - 在容器兼容时支持 H.264、H.265、AV1 和 VP9 视频选项
-- 在 Apple silicon 上使用 VideoToolbox 对 H.264 和 H.265 进行硬件编码
+- 在已安装的 FFmpeg 提供对应 encoder 时，使用 VideoToolbox 硬件编码 H.264 和 H.265
 - 在容器兼容时支持 AAC、Opus、MP3 或禁用音频
 - 提供原始分辨率、2160p、1440p、1080p、720p 和 480p 预设
 - 使用各编解码器对应的恒定质量值提供视频质量预设
@@ -290,8 +290,8 @@ cargo build --release
 手动运行 **Release** workflow 可以测试两种 macOS 架构的打包流程，但不会创建 GitHub Release。正式发布前先更新 `Cargo.toml` 中的 `package.version`，再创建并推送一致的三段式版本 tag：
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
 workflow 会测试并打包 Apple silicon 和 Intel 原生二进制文件，发布两个压缩包及 `SHA256SUMS`，然后更新 `softmaxe/homebrew-tap` 中的 `Formula/otter.rb`。`bump-tap` job 需要名为 `OTTER_HOMEBREW_TAP_UPDATER` 的 Actions secret，并且该 token 必须有目标仓库的写入权限。
