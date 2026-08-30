@@ -1,6 +1,19 @@
-# otter
+<p align="center">
+  <img src="./docs/assets/otter-logo.png" alt="otter logo" width="180">
+</p>
 
-A macOS-first terminal interface for configuring and running FFmpeg transcodes — one file or a whole batch — without writing FFmpeg commands by hand.
+<h1 align="center">otter</h1>
+
+<p align="center">
+  <a href="README.md"><kbd>English</kbd></a>
+  <a href="README.zh-CN.md"><kbd>简体中文</kbd></a>
+</p>
+
+Configure and run FFmpeg transcodes from a terminal interface on macOS.
+
+<p align="center">
+  <img src="./docs/assets/otter-demo.gif" alt="otter terminal interface demo" width="720">
+</p>
 
 otter lets you choose one or many inputs with a built-in file picker, select compatible containers and codecs, control resolution and bitrate, review the exact command, and monitor conversion progress from one terminal screen.
 
