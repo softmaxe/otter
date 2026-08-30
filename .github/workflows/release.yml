@@ -1,0 +1,335 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate release tag
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must match vX.Y.Z: $tag" >&2
+            exit 1
+          fi
+
+          package_version="$(awk '
+            /^\[package\]$/ { in_package = 1; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^version = "/ {
+              value = $0
+              sub(/^version = "/, "", value)
+              sub(/"[[:space:]]*$/, "", value)
+              print value
+              exit
+            }
+          ' Cargo.toml)"
+          tag_version="${tag#v}"
+
+          if [[ -z "$package_version" ]]; then
+            echo "Could not read package.version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$tag_version" != "$package_version" ]]; then
+            echo "Tag version $tag_version does not match Cargo.toml package.version $package_version" >&2
+            exit 1
+          fi
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Verify native runner architecture
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          actual_arch="$(uname -m)"
+          if [[ "$actual_arch" != "$EXPECTED_ARCH" ]]; then
+            echo "Runner architecture $actual_arch does not match $EXPECTED_ARCH" >&2
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust 1.85.0 and target
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.85.0 --profile minimal --no-self-update
+          rustup target add --toolchain 1.85.0 "${{ matrix.target }}"
+          rustup show active-toolchain
+
+      - name: Run tests
+        shell: bash
+        run: cargo +1.85.0 test --locked
+
+      - name: Build release binary
+        shell: bash
+        run: cargo +1.85.0 build --release --locked --target "${{ matrix.target }}"
+
+      - name: Set package metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(awk '
+            /^\[package\]$/ { in_package = 1; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^version = "/ {
+              value = $0
+              sub(/^version = "/, "", value)
+              sub(/"[[:space:]]*$/, "", value)
+              print value
+              exit
+            }
+          ' Cargo.toml)"
+          if [[ -z "$package_version" ]]; then
+            echo "Could not read package.version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$package_version"
+          fi
+          echo "package_name=otter-v${version}-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+
+      - name: Package release archive
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.metadata.outputs.package_name }}
+          TARGET: ${{ matrix.target }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/otter"
+          actual_arch="$(lipo -archs "$binary")"
+          if [[ "$actual_arch" != "$EXPECTED_ARCH" ]]; then
+            echo "Binary architecture $actual_arch does not match $EXPECTED_ARCH" >&2
+            exit 1
+          fi
+
+          staging_root="$RUNNER_TEMP/otter-package"
+          package_dir="$staging_root/$PACKAGE_NAME"
+          archive_path="$GITHUB_WORKSPACE/dist/$PACKAGE_NAME.tar.gz"
+          rm -rf "$staging_root"
+          mkdir -p "$package_dir" "${archive_path%/*}"
+          cp "$binary" "$package_dir/otter"
+          cp README.md README.zh-CN.md "$package_dir/"
+          tar -C "$staging_root" -czf "$archive_path" "$PACKAGE_NAME"
+
+          for file in otter README.md README.zh-CN.md; do
+            tar -tzf "$archive_path" | grep -Fx "$PACKAGE_NAME/$file" >/dev/null
+          done
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-${{ matrix.arch }}
+          path: dist/${{ steps.metadata.outputs.package_name }}.tar.gz
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'push' && 1 || 14 }}
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Validate archives and generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected=(
+            "dist/otter-v${version}-aarch64-apple-darwin.tar.gz"
+            "dist/otter-v${version}-x86_64-apple-darwin.tar.gz"
+          )
+          shopt -s nullglob
+          archives=(dist/otter-v*.tar.gz)
+          if [[ "${#archives[@]}" -ne 2 ]]; then
+            echo "Expected two release archives, found ${#archives[@]}" >&2
+            exit 1
+          fi
+          for archive in "${expected[@]}"; do
+            if [[ ! -f "$archive" ]]; then
+              echo "Missing expected release archive: $archive" >&2
+              exit 1
+            fi
+          done
+          (
+            cd dist
+            sha256sum otter-v*.tar.gz | sort -k2 > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Ensure tag has no existing release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "A release already exists for $GITHUB_REF_NAME; refusing to overwrite it" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --generate-notes \
+            --title "otter ${GITHUB_REF_NAME#v}" \
+            --notes "WARNING: These macOS binaries are unsigned. Gatekeeper may warn when you first run them." \
+            dist/*
+
+  bump-tap:
+    name: Update Homebrew tap
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Update tap formula
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAP_GITHUB_TOKEN: ${{ secrets.OTTER_HOMEBREW_TAP_UPDATER }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TAP_GITHUB_TOKEN:-}" ]]; then
+            echo "OTTER_HOMEBREW_TAP_UPDATER is not set, skip tap update." >&2
+            echo "Add a token with write access to softmaxe/homebrew-tap in the otter repository settings." >&2
+            exit 0
+          fi
+
+          version="${TAG#v}"
+          tmp_tap="$(mktemp -d)"
+          tmp_dist="$(mktemp -d)"
+          trap 'rm -rf "$tmp_tap" "$tmp_dist"' EXIT
+
+          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/softmaxe/homebrew-tap.git" "$tmp_tap"
+          gh release download "$TAG" --repo softmaxe/otter --pattern "SHA256SUMS" --dir "$tmp_dist"
+
+          get_sha() {
+            local name="$1"
+            awk -v n="$name" '$2 == n { print $1 }' "$tmp_dist/SHA256SUMS"
+          }
+
+          sha_arm="$(get_sha "otter-v${version}-aarch64-apple-darwin.tar.gz")"
+          sha_intel="$(get_sha "otter-v${version}-x86_64-apple-darwin.tar.gz")"
+          for value in sha_arm sha_intel; do
+            if [[ -z "${!value:-}" ]]; then
+              echo "Missing SHA for $value" >&2
+              exit 1
+            fi
+          done
+
+          formula="$tmp_tap/Formula/otter.rb"
+          mkdir -p "${formula%/*}"
+          python3 - "$formula" "$version" "$sha_arm" "$sha_intel" <<'PY'
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          version, sha_arm, sha_intel = sys.argv[2:5]
+          path.write_text(f'''class Otter < Formula
+            desc "Terminal interface for FFmpeg transcoding"
+            homepage "https://github.com/softmaxe/otter"
+
+            depends_on "ffmpeg"
+            depends_on :macos
+
+            on_macos do
+              on_arm do
+                url "https://github.com/softmaxe/otter/releases/download/v{version}/otter-v{version}-aarch64-apple-darwin.tar.gz"
+                sha256 "{sha_arm}"
+              end
+              on_intel do
+                url "https://github.com/softmaxe/otter/releases/download/v{version}/otter-v{version}-x86_64-apple-darwin.tar.gz"
+                sha256 "{sha_intel}"
+              end
+            end
+
+            def install
+              bin.install "otter"
+            end
+
+            test do
+              assert_predicate bin/"otter", :executable?
+            end
+          end
+          ''')
+          PY
+          ruby -c "$formula"
+
+          git -C "$tmp_tap" config user.name "github-actions[bot]"
+          git -C "$tmp_tap" config user.email "github-actions[bot]@users.noreply.github.com"
+          git -C "$tmp_tap" add Formula/otter.rb
+          if git -C "$tmp_tap" diff --cached --quiet; then
+            echo "No tap changes to commit"
+            exit 0
+          fi
+          git -C "$tmp_tap" commit -m "chore: bump otter to ${version}"
+
+          for attempt in 1 2 3; do
+            if git -C "$tmp_tap" push origin main; then
+              break
+            fi
+            if [[ "$attempt" -eq 3 ]]; then
+              echo "Failed to push tap after 3 attempts" >&2
+              exit 1
+            fi
+            sleep $((attempt * 2))
+            git -C "$tmp_tap" fetch origin main
+            git -C "$tmp_tap" rebase origin/main
+          done

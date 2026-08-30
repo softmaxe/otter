@@ -38,28 +38,32 @@ otter lets you choose one or many inputs with a built-in file picker, select com
   the rest of the batch
 - Refusal to overwrite an existing output file
 
-## Requirements
+## Installation
 
-- macOS
-- Rust 1.85 or newer
-- FFmpeg and FFprobe
-- An interactive terminal
+### Homebrew
 
-Install the required tools with Homebrew:
+Homebrew installs the prebuilt binary and its FFmpeg dependency:
+
+```sh
+brew tap softmaxe/tap
+brew install otter
+```
+
+Keep it current with `brew update && brew upgrade otter`. You can also install it without tapping first:
+
+```sh
+brew install softmaxe/tap/otter
+```
+
+Run `otter` directly in an interactive terminal.
+
+### From source
+
+Building from source requires macOS, Rust 1.85 or newer, FFmpeg, FFprobe, and an interactive terminal. Install the build and runtime tools with Homebrew:
 
 ```sh
 brew install rust ffmpeg
 ```
-
-otter searches `PATH`, `/opt/homebrew/bin`, and `/usr/local/bin`. Custom binary locations can be selected with environment variables:
-
-```sh
-OTTER_FFMPEG=/custom/path/ffmpeg \
-OTTER_FFPROBE=/custom/path/ffprobe \
-cargo run --release
-```
-
-## Build and run
 
 ```sh
 cargo build --release
@@ -73,6 +77,14 @@ cargo run
 ```
 
 The application must be run directly in an interactive terminal. Redirected stdin or stdout is not supported.
+
+otter searches `PATH`, `/opt/homebrew/bin`, and `/usr/local/bin`. Custom binary locations can be selected with environment variables:
+
+```sh
+OTTER_FFMPEG=/custom/path/ffmpeg \
+OTTER_FFPROBE=/custom/path/ffprobe \
+cargo run --release
+```
 
 ## Workflow
 
@@ -274,3 +286,14 @@ cargo build --release
 ```
 
 The integration tests generate temporary synthetic media with FFmpeg. They skip when FFmpeg, FFprobe, `libx264`, or AAC is unavailable and do not access user media files. The VideoToolbox test additionally skips when the hardware encoders are missing.
+
+## Publish a release
+
+Run the **Release** workflow manually to test both macOS packages without publishing a GitHub Release. To publish, first set `package.version` in `Cargo.toml`, then create and push the matching three-part version tag:
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The workflow tests and packages native Apple silicon and Intel binaries, publishes both archives with `SHA256SUMS`, then updates `Formula/otter.rb` in `softmaxe/homebrew-tap`. The `bump-tap` job requires an Actions secret named `OTTER_HOMEBREW_TAP_UPDATER` with write access to that repository.

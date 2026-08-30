@@ -36,28 +36,32 @@ otter 内置文件选择器，可选择一个或多个输入文件。你可以�
 - 支持安全取消并自动清理临时输出，同时停止批次中的剩余任务
 - 拒绝覆盖已有输出文件
 
-## 要求
+## 安装
 
-- macOS
-- Rust 1.85 或更新版本
-- FFmpeg 和 FFprobe
-- 交互式终端
+### Homebrew
 
-使用 Homebrew 安装所需工具：
+Homebrew 会安装预编译二进制文件及其 FFmpeg 依赖：
+
+```sh
+brew tap softmaxe/tap
+brew install otter
+```
+
+使用 `brew update && brew upgrade otter` 更新。也可以不先 tap，直接安装：
+
+```sh
+brew install softmaxe/tap/otter
+```
+
+在交互式终端中直接运行 `otter`。
+
+### 从源码安装
+
+从源码构建需要 macOS、Rust 1.85 或更新版本、FFmpeg、FFprobe 和交互式终端。使用 Homebrew 安装构建及运行工具：
 
 ```sh
 brew install rust ffmpeg
 ```
-
-otter 会搜索 `PATH`、`/opt/homebrew/bin` 和 `/usr/local/bin`。可以通过环境变量指定自定义二进制文件位置：
-
-```sh
-OTTER_FFMPEG=/custom/path/ffmpeg \
-OTTER_FFPROBE=/custom/path/ffprobe \
-cargo run --release
-```
-
-## 构建和运行
 
 ```sh
 cargo build --release
@@ -71,6 +75,14 @@ cargo run
 ```
 
 应用必须直接在交互式终端中运行，不支持重定向 stdin 或 stdout。
+
+otter 会搜索 `PATH`、`/opt/homebrew/bin` 和 `/usr/local/bin`。可以通过环境变量指定自定义二进制文件位置：
+
+```sh
+OTTER_FFMPEG=/custom/path/ffmpeg \
+OTTER_FFPROBE=/custom/path/ffprobe \
+cargo run --release
+```
 
 ## 操作流程
 
@@ -272,3 +284,14 @@ cargo build --release
 ```
 
 集成测试会使用 FFmpeg 生成临时的合成媒体。缺少 FFmpeg、FFprobe、`libx264` 或 AAC 时，测试会跳过，且不会访问用户的媒体文件。缺少硬件 encoder 时，VideoToolbox 测试也会跳过。
+
+## 发布版本
+
+手动运行 **Release** workflow 可以测试两种 macOS 架构的打包流程，但不会创建 GitHub Release。正式发布前先更新 `Cargo.toml` 中的 `package.version`，再创建并推送一致的三段式版本 tag：
+
+```sh
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+workflow 会测试并打包 Apple silicon 和 Intel 原生二进制文件，发布两个压缩包及 `SHA256SUMS`，然后更新 `softmaxe/homebrew-tap` 中的 `Formula/otter.rb`。`bump-tap` job 需要名为 `OTTER_HOMEBREW_TAP_UPDATER` 的 Actions secret，并且该 token 必须有目标仓库的写入权限。
