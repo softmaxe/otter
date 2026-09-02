@@ -5,7 +5,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Flex, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Flex, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap},
@@ -293,8 +293,9 @@ fn render_stepper(frame: &mut Frame<'_>, area: Rect, app: &App) {
 /// beaver's footer and the only always-open channel the app has.
 fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Block::new().style(Style::default().bg(SURFACE)), area);
-    let colour = status_colour(app);
-    let message = preflight_error(app)
+    let preflight = preflight_error(app);
+    let colour = status_colour(app, preflight.is_some());
+    let message = preflight
         .or_else(|| app.status_message.clone())
         .unwrap_or_default();
     frame.render_widget(
@@ -315,8 +316,8 @@ fn render_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 /// A validation problem outweighs status copy: the bar must say what blocks a
 /// run rather than what is false when it does.
-fn status_colour(app: &App) -> Color {
-    if preflight_error(app).is_some() {
+fn status_colour(app: &App, has_preflight_error: bool) -> Color {
+    if has_preflight_error {
         return WARNING;
     }
     match app.screen {
@@ -374,8 +375,11 @@ pub fn handle_mouse(app: &mut App, event: MouseEvent, area: Rect) -> UiCommand {
         }
     } else if app.cancel_confirmation || app.numeric_edit_value().is_some() {
         handle_popup_mouse(app, event, area)
-    } else if event.kind == MouseEventKind::Down(MouseButton::Left) {
-        if let Some(key) = chip_hit(app, event, area) {
+    } else {
+        let chip = (event.kind == MouseEventKind::Down(MouseButton::Left))
+            .then(|| chip_hit(app, event, area))
+            .flatten();
+        if let Some(key) = chip {
             chip_action(app, key)
         } else {
             match app.screen {
@@ -384,14 +388,6 @@ pub fn handle_mouse(app: &mut App, event: MouseEvent, area: Rect) -> UiCommand {
                 Screen::Confirm | Screen::Running | Screen::Result | Screen::Error => {
                     handle_card_mouse(app, event, area)
                 }
-            }
-        }
-    } else {
-        match app.screen {
-            Screen::Folders => handle_folders_mouse(app, event, area),
-            Screen::Settings => handle_settings_mouse(app, event, area),
-            Screen::Confirm | Screen::Running | Screen::Result | Screen::Error => {
-                handle_card_mouse(app, event, area)
             }
         }
     };
@@ -1851,10 +1847,7 @@ fn handle_picker_button_click(
 // ------------------------------------------------------------------- helpers
 
 fn contains(area: Rect, column: u16, row: u16) -> bool {
-    column >= area.x
-        && column < area.x.saturating_add(area.width)
-        && row >= area.y
-        && row < area.y.saturating_add(area.height)
+    area.contains(Position::new(column, row))
 }
 
 fn capped(value: &str, width: usize) -> String {

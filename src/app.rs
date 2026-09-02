@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -11,12 +11,12 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{
     domain::{
         AUDIO_BITRATE_PRESETS, AudioCodec, Container, DraftConfig, InputMedia, OutputTarget,
-        QualityPreset, RateControlMode, Resolution, SizeEstimate, VIDEO_BITRATE_PRESETS,
-        estimate_queue_size, file_label, quality_setting, supported_audio_codecs,
-        supported_video_codecs,
+        QualityPreset, RateControlMode, Resolution, SizeEstimate, TranscodeConfig,
+        VIDEO_BITRATE_PRESETS, estimate_queue_size, file_label, quality_setting,
+        supported_audio_codecs, supported_video_codecs,
     },
     media::probe_media,
-    picker::{Picker, PickerAction, PickerMode},
+    picker::{Picker, PickerAction, PickerMode, home_dir},
     toolchain::Toolchain,
     transcode::{
         OutputArtifact, ProgressUpdate, QueuedJob, TranscodeHandle, WorkerEvent,
@@ -253,7 +253,7 @@ impl App {
             .map(|target| target.path().to_owned())
             .or_else(|| self.input_folder.clone())
             .or_else(|| self.first_input_directory())
-            .or_else(picker_home_dir);
+            .or_else(home_dir);
         (directory, None)
     }
 
@@ -263,7 +263,7 @@ impl App {
         let start = self
             .first_input_directory()
             .or_else(|| self.input_folder.clone())
-            .or_else(picker_home_dir)
+            .or_else(home_dir)
             .or_else(|| std::env::current_dir().ok());
         let Some(start) = start else { return };
         self.hover = None;
@@ -315,8 +315,7 @@ impl App {
     }
 
     pub fn poll_background(&mut self) {
-        let events: Vec<_> = self.event_rx.try_iter().collect();
-        for event in events {
+        while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 AppEvent::Probe { input, result } => {
                     // A result for a file that is no longer selected is stale.
@@ -434,14 +433,18 @@ impl App {
         if self.draft.inputs.is_empty() || !self.all_probed() {
             return None;
         }
+        self.validated_configs().err()
+    }
+
+    fn validated_configs(&self) -> Result<Vec<TranscodeConfig>, String> {
         if !self.toolchain.supports_video(self.draft.video_codec) {
-            return Some(format!(
+            return Err(format!(
                 "{} is not available in this FFmpeg build.",
                 self.draft.video_codec.encoder()
             ));
         }
         if !self.toolchain.supports_audio(self.draft.audio_codec) {
-            return Some(format!(
+            return Err(format!(
                 "{} is not available in this FFmpeg build.",
                 self.draft.audio_codec.encoder().unwrap_or("audio encoder")
             ));
@@ -450,13 +453,12 @@ impl App {
         // instead of being silently dropped from it.
         for input in &self.draft.inputs {
             if let Some(error) = self.probe_error_for(input) {
-                return Some(format!("{}: {error}", file_label(input)));
+                return Err(format!("{}: {error}", file_label(input)));
             }
         }
         self.draft
             .validated_queue(&self.sources())
-            .err()
-            .map(|error| error.to_string())
+            .map_err(|error| error.to_string())
     }
 
     pub fn quality_label(&self) -> String {
@@ -502,17 +504,14 @@ impl App {
 
     /// Replaces the selection with `paths`, ignoring duplicates.
     pub fn select_inputs(&mut self, paths: Vec<PathBuf>) {
-        let mut inputs: Vec<PathBuf> = Vec::with_capacity(paths.len());
-        for path in paths {
-            if !inputs.contains(&path) {
-                inputs.push(path);
-            }
-        }
-        self.draft.inputs = inputs;
+        let mut selected = HashSet::with_capacity(paths.len());
+        self.draft.inputs = paths
+            .into_iter()
+            .filter(|path| selected.insert(path.clone()))
+            .collect();
         self.invalidate_plan();
         // Keep what is already known: re-selecting a file that was probed a moment
         // ago should not read it again.
-        let selected = self.draft.inputs.clone();
         self.probes.retain(|path, _| selected.contains(path));
         self.refresh_output_target();
 
@@ -1152,14 +1151,10 @@ impl App {
             self.status_message = Some("Still reading the selected files…".to_owned());
             return;
         }
-        if let Some(error) = self.current_validation_error() {
-            self.status_message = Some(error);
-            return;
-        }
-        let configs = match self.draft.validated_queue(&self.sources()) {
+        let configs = match self.validated_configs() {
             Ok(configs) => configs,
             Err(error) => {
-                self.status_message = Some(error.to_string());
+                self.status_message = Some(error);
                 return;
             }
         };
@@ -1272,12 +1267,6 @@ fn probing_message(remaining: usize) -> String {
         0 | 1 => "Probing input media…".to_owned(),
         count => format!("Probing input media… {count} files left."),
     }
-}
-
-/// Where the pickers land when there is nothing to go on yet.
-fn picker_home_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    (!home.is_empty()).then(|| PathBuf::from(home))
 }
 
 fn cycle<T: Copy + PartialEq>(values: &[T], current: T, direction: i32) -> T {

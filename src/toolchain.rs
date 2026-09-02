@@ -12,17 +12,12 @@ use crate::domain::{AudioCodec, VideoCodec};
 
 /// The encoders this app can offer. Discovery only asks whether the local FFmpeg
 /// build reports these; anything else it can do is irrelevant here.
-const ENCODERS: [&str; 9] = [
-    "libx264",
-    "libx265",
-    "libsvtav1",
-    "libvpx-vp9",
-    "h264_videotoolbox",
-    "hevc_videotoolbox",
-    "aac",
-    "libopus",
-    "libmp3lame",
-];
+fn encoder_names() -> impl Iterator<Item = &'static str> {
+    VideoCodec::ALL
+        .into_iter()
+        .map(VideoCodec::encoder)
+        .chain(AudioCodec::ALL.into_iter().filter_map(AudioCodec::encoder))
+}
 
 #[derive(Debug, Clone)]
 pub struct Toolchain {
@@ -67,7 +62,7 @@ impl Toolchain {
             ffmpeg: PathBuf::from("/usr/local/bin/ffmpeg"),
             ffprobe: PathBuf::from("/usr/local/bin/ffprobe"),
             ffmpeg_version: "ffmpeg version 8.1.2".to_owned(),
-            encoders: ENCODERS.into_iter().map(str::to_owned).collect(),
+            encoders: encoder_names().map(str::to_owned).collect(),
         }
     }
 }
@@ -123,8 +118,7 @@ fn detect_encoders(path: &Path) -> Result<HashSet<String>, ToolError> {
     let output = run(path, [OsStr::new("-hide_banner"), OsStr::new("-encoders")])?;
     let text = String::from_utf8_lossy(&output.stdout);
     let reported: HashSet<&str> = text.split_whitespace().collect();
-    Ok(ENCODERS
-        .into_iter()
+    Ok(encoder_names()
         .filter(|name| reported.contains(name))
         .map(str::to_owned)
         .collect())
