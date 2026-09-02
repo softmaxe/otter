@@ -14,7 +14,7 @@ use std::{
 };
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 
 /// What the picker asks for. The three flows the application had with native
 /// panels become three modes of the same card.
@@ -125,13 +125,13 @@ impl Picker {
         let mut entries: Vec<Row> = entries
             .flatten()
             .filter_map(|entry| {
-                let path = entry.path();
-                let meta = fs::metadata(&path).ok()?;
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let hidden = name.starts_with('.');
                 if hidden && !self.show_hidden {
                     return None;
                 }
+                let path = entry.path();
+                let meta = fs::metadata(&path).ok()?;
                 if self.mode == PickerMode::InputFolder && !meta.is_dir() {
                     return None;
                 }
@@ -236,7 +236,9 @@ impl Picker {
                 self.scroll = self.scroll.saturating_add(3);
                 PickerAction::None
             }
-            MouseEventKind::Down(MouseButton::Left) if contains(list, event.column, event.row) => {
+            MouseEventKind::Down(MouseButton::Left)
+                if list.contains(Position::new(event.column, event.row)) =>
+            {
                 let Some(row) = event.row.checked_sub(list.y) else {
                     return PickerAction::None;
                 };
@@ -461,16 +463,10 @@ pub fn list_window(scroll: usize, cursor: usize, rows: usize, height: usize) -> 
     window.min(rows.saturating_sub(1))
 }
 
-fn home_dir() -> Option<PathBuf> {
+/// Where the pickers land when there is nothing to go on yet.
+pub(crate) fn home_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
     (!home.is_empty()).then(|| PathBuf::from(home))
-}
-
-fn contains(area: Rect, column: u16, row: u16) -> bool {
-    column >= area.x
-        && column < area.x.saturating_add(area.width)
-        && row >= area.y
-        && row < area.y.saturating_add(area.height)
 }
 
 const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);

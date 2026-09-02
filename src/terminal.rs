@@ -30,14 +30,14 @@ impl TerminalSession {
         enable_raw_mode()?;
         let mut output = stdout();
         if let Err(error) = execute!(output, EnterAlternateScreen, Hide, EnableMouseCapture) {
-            let _ = execute!(output, DisableMouseCapture, LeaveAlternateScreen, Show);
+            leave_alternate_screen(&mut output);
             let _ = disable_raw_mode();
             return Err(error.into());
         }
         let terminal = match Terminal::new(CrosstermBackend::new(output)) {
             Ok(terminal) => terminal,
             Err(error) => {
-                let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen, Show);
+                leave_alternate_screen(&mut stdout());
                 let _ = disable_raw_mode();
                 return Err(error.into());
             }
@@ -55,12 +55,7 @@ impl TerminalSession {
     pub fn restore(&mut self) {
         if self.active {
             let _ = self.terminal.show_cursor();
-            let _ = execute!(
-                self.terminal.backend_mut(),
-                DisableMouseCapture,
-                LeaveAlternateScreen,
-                Show
-            );
+            leave_alternate_screen(self.terminal.backend_mut());
             let _ = disable_raw_mode();
             self.active = false;
         }
@@ -73,11 +68,15 @@ impl Drop for TerminalSession {
     }
 }
 
+fn leave_alternate_screen(output: &mut impl io::Write) {
+    let _ = execute!(output, DisableMouseCapture, LeaveAlternateScreen, Show);
+}
+
 pub fn install_panic_hook() {
     let original = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen, Show);
+        leave_alternate_screen(&mut stdout());
         original(info);
     }));
 }
