@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -60,9 +60,6 @@ jobs:
           - os: macos-15
             arch: arm64
             target: aarch64-apple-darwin
-          - os: macos-15-intel
-            arch: x86_64
-            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - name: Verify native runner architecture
@@ -184,12 +181,11 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           expected=(
             "dist/otter-v${version}-aarch64-apple-darwin.tar.gz"
-            "dist/otter-v${version}-x86_64-apple-darwin.tar.gz"
           )
           shopt -s nullglob
           archives=(dist/otter-v*.tar.gz)
-          if [[ "${#archives[@]}" -ne 2 ]]; then
-            echo "Expected two release archives, found ${#archives[@]}" >&2
+          if [[ "${#archives[@]}" -ne 1 ]]; then
+            echo "Expected one release archive, found ${#archives[@]}" >&2
             exit 1
           fi
           for archive in "${expected[@]}"; do
@@ -266,8 +262,7 @@ jobs:
           }
 
           sha_arm="$(get_sha "otter-v${version}-aarch64-apple-darwin.tar.gz")"
-          sha_intel="$(get_sha "otter-v${version}-x86_64-apple-darwin.tar.gz")"
-          for value in sha_arm sha_intel; do
+          for value in sha_arm; do
             if [[ -z "${!value:-}" ]]; then
               echo "Missing SHA for $value" >&2
               exit 1
@@ -276,27 +271,24 @@ jobs:
 
           formula="$tmp_tap/Formula/otter.rb"
           mkdir -p "${formula%/*}"
-          python3 - "$formula" "$version" "$sha_arm" "$sha_intel" <<'PY'
+          python3 - "$formula" "$version" "$sha_arm" <<'PY'
           import pathlib
           import sys
 
           path = pathlib.Path(sys.argv[1])
-          version, sha_arm, sha_intel = sys.argv[2:5]
+          version, sha_arm = sys.argv[2:4]
           path.write_text(f'''class Otter < Formula
             desc "Terminal interface for FFmpeg transcoding"
             homepage "https://github.com/softmaxe/otter"
 
             depends_on "ffmpeg"
             depends_on :macos
+            depends_on arch: :arm64
 
             on_macos do
               on_arm do
                 url "https://github.com/softmaxe/otter/releases/download/v{version}/otter-v{version}-aarch64-apple-darwin.tar.gz"
                 sha256 "{sha_arm}"
-              end
-              on_intel do
-                url "https://github.com/softmaxe/otter/releases/download/v{version}/otter-v{version}-x86_64-apple-darwin.tar.gz"
-                sha256 "{sha_intel}"
               end
             end
 
