@@ -35,6 +35,8 @@ brew install softmaxe/tap/otter
 otter
 ```
 
+Homebrew 目前只提供 Apple silicon Mac 版本。otter 没有单独的命令行选项，在交互式终端中运行后会打开终端界面。
+
 后续更新：
 
 ```sh
@@ -71,7 +73,7 @@ otter 默认搜索 `PATH`、`/opt/homebrew/bin` 和 `/usr/local/bin`。
 4. 选择 Review，检查实际 FFmpeg 命令和输出路径，然后选择 Start。
 5. 在 Progress 页面查看每个文件的进度。Done 页面会列出所有文件的结果。
 
-使用 `Tab` 或方向键移动，`Enter` 选择，`Esc` 返回，`q` 退出。也可以使用 `h`/`j`/`k`/`l`。界面支持鼠标点击和滚动，文件选择器支持双击。
+使用 `Tab` 或方向键移动，`Enter` 选择，`Esc` 返回，`q` 退出。也可以使用 `h`/`j`/`k`/`l`。按 `?` 打开界面内帮助；如需取消运行中的队列，按 `x` 后确认。界面支持鼠标点击和滚动，文件选择器支持双击。
 
 ## 支持格式
 
@@ -139,7 +141,7 @@ cargo build --release
 
 集成测试使用 FFmpeg 创建临时合成媒体。依赖未安装 encoder 的测试会跳过。
 
-发布版本时，先更新 `Cargo.toml` 中的 `package.version`，再创建并推送相同的语义化版本 tag。Release workflow 会构建 Apple silicon 和 Intel 压缩包、发布校验和，并更新 `softmaxe/homebrew-tap`。
+发布版本时，先更新 `Cargo.toml` 中的 `package.version`，再创建并推送对应的 `vX.Y.Z` tag。Release workflow 会构建 Apple silicon（`aarch64-apple-darwin`）压缩包并发布校验和；配置更新凭据后，它还会更新 `softmaxe/homebrew-tap`。发布的二进制未签名，首次运行时 macOS Gatekeeper 可能会发出警告。
 
 ## 许可证
 

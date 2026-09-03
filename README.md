@@ -35,6 +35,8 @@ brew install softmaxe/tap/otter
 otter
 ```
 
+The Homebrew package currently supports Apple silicon Macs. otter has no separate command-line options; it opens the terminal interface when run in an interactive terminal.
+
 Update later with:
 
 ```sh
@@ -71,7 +73,7 @@ otter searches `PATH`, `/opt/homebrew/bin`, and `/usr/local/bin` by default.
 4. Choose Review to inspect the exact FFmpeg command and output paths, then choose Start.
 5. Follow each file on the Progress screen. The Done screen lists the result of every file.
 
-Use `Tab` or arrow keys to move, `Enter` to select, `Esc` to go back, and `q` to quit. `h`/`j`/`k`/`l` also work. The interface supports clicking, scrolling, and double-clicking in the file picker.
+Use `Tab` or arrow keys to move, `Enter` to select, `Esc` to go back, and `q` to quit. `h`/`j`/`k`/`l` also work. Press `?` for the in-app help. To cancel a running queue, press `x` and confirm. The interface supports clicking, scrolling, and double-clicking in the file picker.
 
 ## Formats
 
@@ -139,7 +141,7 @@ cargo build --release
 
 Integration tests create temporary synthetic media with FFmpeg. Tests that need unavailable encoders are skipped.
 
-To publish a release, update `package.version` in `Cargo.toml`, then create and push the matching semantic-version tag. The Release workflow builds Apple silicon and Intel archives, publishes checksums, and updates `softmaxe/homebrew-tap`.
+To publish a release, update `package.version` in `Cargo.toml`, then create and push the matching `vX.Y.Z` tag. The Release workflow builds an Apple silicon (`aarch64-apple-darwin`) archive, publishes checksums, and updates `softmaxe/homebrew-tap` when its updater token is configured. Release binaries are unsigned, so macOS Gatekeeper may warn the first time you run one.
 
 ## License
 
