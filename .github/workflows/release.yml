@@ -253,22 +253,27 @@ jobs:
     name: Update Homebrew tap
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: release
-    runs-on: ubuntu-22.04
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
+      - name: Update Homebrew
+        run: brew update
+
       - name: Update tap formula
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAP_GITHUB_TOKEN: ${{ secrets.OTTER_HOMEBREW_TAP_UPDATER }}
           TAG: ${{ github.ref_name }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_DEVELOPER: "1"
         run: |
           set -euo pipefail
           if [[ -z "${TAP_GITHUB_TOKEN:-}" ]]; then
-            echo "OTTER_HOMEBREW_TAP_UPDATER is not set, skip tap update." >&2
+            echo "::error::OTTER_HOMEBREW_TAP_UPDATER is required to publish the Homebrew formula." >&2
             echo "Add a token with write access to softmaxe/homebrew-tap in the otter repository settings." >&2
-            exit 0
+            exit 1
           fi
 
           version="${TAG#v}"
@@ -304,9 +309,9 @@ jobs:
             desc "Terminal interface for FFmpeg transcoding"
             homepage "https://github.com/softmaxe/otter"
 
+            depends_on arch: :arm64
             depends_on "ffmpeg"
             depends_on :macos
-            depends_on arch: :arm64
 
             on_macos do
               on_arm do
@@ -326,6 +331,8 @@ jobs:
           ''')
           PY
           ruby -c "$formula"
+          brew info --formula "$formula"
+          brew fetch --formula "$formula"
 
           git -C "$tmp_tap" config user.name "github-actions[bot]"
           git -C "$tmp_tap" config user.email "github-actions[bot]@users.noreply.github.com"
