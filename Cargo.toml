@@ -1,6 +1,6 @@
 [package]
 name = "otter"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2024"
 rust-version = "1.85"
 description = "A macOS-first terminal interface for FFmpeg transcoding, one file or many"
