@@ -85,6 +85,29 @@ jobs:
           rustup target add --toolchain 1.85.0 "${{ matrix.target }}"
           rustup show active-toolchain
 
+      - name: Prepare FFmpeg test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
+            brew install ffmpeg
+          fi
+          for tool in ffmpeg ffprobe; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "$tool is required to run the integration tests" >&2
+              exit 1
+            fi
+          done
+
+          ffprobe -version >/dev/null
+          encoders="$(ffmpeg -hide_banner -encoders)"
+          for encoder in libx264 aac; do
+            if ! grep -Fqw "$encoder" <<<"$encoders"; then
+              echo "FFmpeg encoder $encoder is required to run the integration tests" >&2
+              exit 1
+            fi
+          done
+
       - name: Run tests
         shell: bash
         run: cargo +1.85.0 test --locked

@@ -84,14 +84,24 @@ pub enum ToolError {
 }
 
 fn resolve_tool(override_name: &str, binary: &str) -> Option<PathBuf> {
-    if let Some(path) = env::var_os(override_name).map(PathBuf::from) {
+    let override_path = env::var_os(override_name);
+    let search_path = env::var_os("PATH");
+    resolve_tool_from(override_path.as_deref(), search_path.as_deref(), binary)
+}
+
+fn resolve_tool_from(
+    override_path: Option<&OsStr>,
+    search_path: Option<&OsStr>,
+    binary: &str,
+) -> Option<PathBuf> {
+    if let Some(path) = override_path.map(PathBuf::from) {
         if path.is_file() {
             return Some(path);
         }
     }
 
-    if let Some(paths) = env::var_os("PATH") {
-        for directory in env::split_paths(&paths) {
+    if let Some(paths) = search_path {
+        for directory in env::split_paths(paths) {
             let candidate = directory.join(binary);
             if candidate.is_file() {
                 return Some(candidate);
@@ -149,10 +159,26 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]
-    fn nonexistent_override_falls_back_instead_of_panicking() {
-        assert!(resolve_tool("OTTER_TEST_MISSING", "definitely-not-a-real-binary").is_none());
+    fn nonexistent_override_falls_back_to_search_path() {
+        let directory = tempfile::tempdir().expect("a temp directory should be created");
+        let binary = "otter-test-ffmpeg";
+        let fallback = directory.path().join(binary);
+        fs::write(&fallback, b"").expect("the fallback tool should be created");
+        let missing_override = directory.path().join("missing-override");
+        let search_path = env::join_paths([directory.path()]).expect("the search path should join");
+
+        assert_eq!(
+            resolve_tool_from(
+                Some(missing_override.as_os_str()),
+                Some(search_path.as_os_str()),
+                binary,
+            ),
+            Some(fallback)
+        );
     }
 }
