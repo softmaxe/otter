@@ -121,7 +121,6 @@ pub enum HoverTarget {
     PickerCancel,
     PickerParent,
     PickerPrimary,
-    PickerName,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,17 +243,15 @@ impl App {
     }
 
     /// The output picker always chooses a directory, even for one input file.
-    pub fn output_picker_info(&self) -> (Option<PathBuf>, Option<String>) {
-        let directory = self
-            .draft
+    pub fn output_picker_info(&self) -> Option<PathBuf> {
+        self.draft
             .output
             .as_ref()
             .filter(|target| target.is_directory())
             .map(|target| target.path().to_owned())
             .or_else(|| self.input_folder.clone())
             .or_else(|| self.first_input_directory())
-            .or_else(home_dir);
-        (directory, None)
+            .or_else(home_dir)
     }
 
     /// Opens the input-file picker. The first input's parent is the most useful
@@ -267,15 +264,16 @@ impl App {
             .or_else(|| std::env::current_dir().ok());
         let Some(start) = start else { return };
         self.hover = None;
-        self.picker = Some(Picker::open(PickerMode::InputFiles, start, None, add));
+        self.picker = Some(Picker::open(PickerMode::InputFiles, start, add));
     }
 
     /// Opens the output-folder picker.
     pub fn open_output_picker(&mut self) {
-        let (directory, _) = self.output_picker_info();
-        let start = directory.unwrap_or_else(|| PathBuf::from("."));
+        let start = self
+            .output_picker_info()
+            .unwrap_or_else(|| PathBuf::from("."));
         self.hover = None;
-        self.picker = Some(Picker::open(PickerMode::OutputFolder, start, None, false));
+        self.picker = Some(Picker::open(PickerMode::OutputFolder, start, false));
     }
 
     /// Applies the picker's decision and drops it. An empty input selection is
@@ -297,12 +295,11 @@ impl App {
                         self.select_inputs(paths);
                     }
                 }
-                PickerMode::OutputFile | PickerMode::OutputFolder => {
+                PickerMode::OutputFolder => {
                     if let Some(path) = paths.into_iter().next() {
                         self.select_output(path);
                     }
                 }
-                PickerMode::InputFolder => {}
                 PickerMode::InputFiles => {}
             },
         }
@@ -1379,7 +1376,6 @@ mod tests {
         app.picker = Some(Picker::open(
             PickerMode::InputFiles,
             root.path().to_owned(),
-            None,
             false,
         ));
         app.close_picker(PickerAction::Done(vec![first.clone(), second.clone()]));
@@ -1388,7 +1384,6 @@ mod tests {
         app.picker = Some(Picker::open(
             PickerMode::InputFiles,
             root.path().to_owned(),
-            None,
             true,
         ));
         app.close_picker(PickerAction::Done(vec![third.clone(), second.clone()]));
@@ -1589,7 +1584,6 @@ mod tests {
         app.picker = Some(Picker::open(
             PickerMode::InputFiles,
             root.path().to_owned(),
-            None,
             false,
         ));
         app.close_picker(PickerAction::Cancel);
@@ -1597,7 +1591,6 @@ mod tests {
         app.picker = Some(Picker::open(
             PickerMode::InputFiles,
             root.path().to_owned(),
-            None,
             false,
         ));
         app.close_picker(PickerAction::Done(vec![
@@ -1616,14 +1609,12 @@ mod tests {
         let mut app = App::new(Toolchain::test_fixture());
         app.select_inputs(vec![PathBuf::from("/media/clips/a.mov")]);
 
-        let (directory, file_name) = app.output_picker_info();
+        let directory = app.output_picker_info();
         assert_eq!(directory.as_deref(), Some(Path::new("/media/clips")));
-        assert!(file_name.is_none());
 
         app.add_inputs(vec![PathBuf::from("/media/clips/b.mov")]);
-        let (directory, file_name) = app.output_picker_info();
+        let directory = app.output_picker_info();
         assert_eq!(directory.as_deref(), Some(Path::new("/media/clips")));
-        assert!(file_name.is_none());
 
         // The mode stays a folder even for one input.
         app.select_inputs(vec![PathBuf::from("/media/clips/a.mov")]);

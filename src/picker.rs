@@ -16,17 +16,11 @@ use std::{
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-/// What the picker asks for. The three flows the application had with native
-/// panels become three modes of the same card.
+/// What the picker asks for. Input files and the output folder share the same card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerMode {
-    /// Legacy folder mode retained for callers that use the picker directly.
-    /// The application input workflow uses [`PickerMode::InputFiles`].
-    InputFolder,
     /// Any number of media files, one per line or Space-selected.
     InputFiles,
-    /// One destination file: a folder plus a file name.
-    OutputFile,
     /// One destination folder for a queue.
     OutputFolder,
 }
@@ -77,10 +71,6 @@ pub struct Picker {
     pub scroll: usize,
     /// Input mode: the files marked with Space.
     pub selected: Vec<PathBuf>,
-    /// Output-file mode: the file name being edited.
-    pub filename: String,
-    /// Output-file mode: `true` while the file name field has keyboard focus.
-    pub editing_name: bool,
     pub show_hidden: bool,
     /// A message that is not a selection, e.g. a directory that could not be read.
     pub error: Option<String>,
@@ -89,7 +79,7 @@ pub struct Picker {
 }
 
 impl Picker {
-    pub fn open(mode: PickerMode, dir: PathBuf, file_name: Option<String>, append: bool) -> Self {
+    pub fn open(mode: PickerMode, dir: PathBuf, append: bool) -> Self {
         let mut picker = Self {
             mode,
             append,
@@ -98,8 +88,6 @@ impl Picker {
             cursor: 0,
             scroll: 0,
             selected: Vec::new(),
-            filename: file_name.unwrap_or_default(),
-            editing_name: false,
             show_hidden: false,
             error: None,
             last_click: None,
@@ -132,9 +120,6 @@ impl Picker {
                 }
                 let path = entry.path();
                 let meta = fs::metadata(&path).ok()?;
-                if self.mode == PickerMode::InputFolder && !meta.is_dir() {
-                    return None;
-                }
                 // metadata follows symlinks: a link to a folder becomes a folder.
                 Some(Row::Entry(Entry {
                     name,
@@ -170,9 +155,6 @@ impl Picker {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
-        if self.editing_name {
-            return self.handle_name_key(key);
-        }
         match key.code {
             KeyCode::Esc => PickerAction::Cancel,
             KeyCode::Up | KeyCode::Char('k') => {
@@ -214,10 +196,6 @@ impl Picker {
             }
             KeyCode::End => {
                 self.nudge(self.rows.len() as i32);
-                PickerAction::None
-            }
-            KeyCode::Tab if self.mode == PickerMode::OutputFile => {
-                self.editing_name = true;
                 PickerAction::None
             }
             _ => PickerAction::None,
@@ -275,9 +253,7 @@ impl Picker {
     /// button does, and what the status bar names on the right.
     pub fn primary_label(&self) -> String {
         match self.mode {
-            PickerMode::InputFolder => "Use this folder".to_owned(),
             PickerMode::InputFiles => format!("Done ({})", self.selected.len()),
-            PickerMode::OutputFile => "Save here".to_owned(),
             PickerMode::OutputFolder => "Use this folder".to_owned(),
         }
     }
@@ -285,55 +261,20 @@ impl Picker {
     /// Whether the primary action can go through right now.
     pub fn primary_ready(&self) -> bool {
         match self.mode {
-            PickerMode::InputFolder => true,
             PickerMode::InputFiles => !self.selected.is_empty(),
-            PickerMode::OutputFile => !self.filename.trim().is_empty(),
             PickerMode::OutputFolder => true,
-        }
-    }
-
-    /// Puts the keyboard in the file name field (output-file mode).
-    pub fn focus_name(&mut self) {
-        if self.mode == PickerMode::OutputFile {
-            self.editing_name = true;
         }
     }
 
     /// The help line of the status bar, one per mode.
     pub fn footer_help(&self) -> &'static str {
         match self.mode {
-            PickerMode::InputFolder => {
-                " ↑↓ move   ↵ enter   s use this folder   ← parent   esc cancel "
-            }
             PickerMode::InputFiles => {
                 " ↑↓ move   ↵ open/confirm   space select   s done   ← parent   esc cancel "
-            }
-            PickerMode::OutputFile => {
-                " ↑↓ move   ↵ open   s save here   tab name   ← parent   esc cancel "
             }
             PickerMode::OutputFolder => {
                 " ↑↓ move   ↵ open   s use this folder   ← parent   esc cancel "
             }
-        }
-    }
-
-    fn handle_name_key(&mut self, key: KeyEvent) -> PickerAction {
-        match key.code {
-            KeyCode::Char(c) if c.is_ascii_graphic() || c == ' ' => {
-                self.filename.push(c);
-                PickerAction::None
-            }
-            KeyCode::Backspace => {
-                self.filename.pop();
-                PickerAction::None
-            }
-            KeyCode::Esc => PickerAction::Cancel,
-            KeyCode::Enter => self.confirm_current(),
-            KeyCode::Tab => {
-                self.editing_name = false;
-                PickerAction::None
-            }
-            _ => PickerAction::None,
         }
     }
 
@@ -376,7 +317,6 @@ impl Picker {
             Some(Row::Entry(entry)) if entry.is_dir => Some(entry.path.clone()),
             Some(Row::Entry(entry)) => {
                 return match self.mode {
-                    PickerMode::InputFolder => PickerAction::None,
                     PickerMode::InputFiles => {
                         let mut paths = self.selected.clone();
                         if !paths
@@ -387,7 +327,6 @@ impl Picker {
                         }
                         PickerAction::Done(paths)
                     }
-                    PickerMode::OutputFile => PickerAction::Done(vec![entry.path.clone()]),
                     PickerMode::OutputFolder => PickerAction::None,
                 };
             }
@@ -402,7 +341,6 @@ impl Picker {
     /// The primary action: the mode's whole point.
     fn confirm_current(&mut self) -> PickerAction {
         match self.mode {
-            PickerMode::InputFolder => PickerAction::Done(vec![self.dir.clone()]),
             PickerMode::InputFiles => {
                 if self.selected.is_empty() {
                     self.error =
@@ -410,15 +348,6 @@ impl Picker {
                     return PickerAction::None;
                 }
                 PickerAction::Done(std::mem::take(&mut self.selected))
-            }
-            PickerMode::OutputFile => {
-                let name = self.filename.trim();
-                if name.is_empty() {
-                    self.error = Some("Enter a file name first.".to_owned());
-                    self.editing_name = true;
-                    return PickerAction::None;
-                }
-                PickerAction::Done(vec![self.dir.join(name)])
             }
             PickerMode::OutputFolder => PickerAction::Done(vec![self.dir.clone()]),
         }
@@ -478,7 +407,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn picker(dir: &Path) -> Picker {
-        Picker::open(PickerMode::InputFiles, dir.to_owned(), None, false)
+        Picker::open(PickerMode::InputFiles, dir.to_owned(), false)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -593,78 +522,12 @@ mod tests {
     }
 
     #[test]
-    fn save_mode_edits_a_name_and_confirms() {
-        let root = tempdir().expect("a temp directory should be created");
-        let mut picker = Picker::open(
-            PickerMode::OutputFile,
-            root.path().to_owned(),
-            Some("clip".to_owned()),
-            false,
-        );
-        assert_eq!(picker.handle_key(key(KeyCode::Tab)), PickerAction::None);
-        assert!(picker.editing_name);
-
-        picker.handle_key(key(KeyCode::Char('z')));
-        assert_eq!(picker.filename, "clipz");
-        assert_eq!(
-            picker.handle_key(key(KeyCode::Enter)),
-            PickerAction::Done(vec![root.path().join("clipz")])
-        );
-    }
-
-    #[test]
-    fn save_mode_joins_name_with_the_current_directory() {
-        let root = tempdir().expect("a temp directory should be created");
-        let mut picker = Picker::open(
-            PickerMode::OutputFile,
-            root.path().to_owned(),
-            Some("clip.mkv".to_owned()),
-            false,
-        );
-        assert_eq!(
-            picker.handle_key(key(KeyCode::Char('s'))),
-            PickerAction::Done(vec![root.path().join("clip.mkv")])
-        );
-    }
-
-    #[test]
     fn folder_mode_selects_the_current_directory() {
         let root = tempdir().expect("a temp directory should be created");
-        let mut picker = Picker::open(
-            PickerMode::OutputFolder,
-            root.path().to_owned(),
-            None,
-            false,
-        );
+        let mut picker = Picker::open(PickerMode::OutputFolder, root.path().to_owned(), false);
         assert_eq!(
             picker.handle_key(key(KeyCode::Char('s'))),
             PickerAction::Done(vec![root.path().to_owned()])
-        );
-    }
-
-    #[test]
-    fn input_folder_mode_lists_directories_and_selects_current_directory() {
-        let root = tempdir().expect("a temp directory should be created");
-        fs::write(root.path().join("clip.mp4"), b"").unwrap();
-        fs::create_dir(root.path().join("nested")).unwrap();
-
-        let mut picker = Picker::open(PickerMode::InputFolder, root.path().to_owned(), None, false);
-        assert_eq!(
-            entry_names(&picker),
-            vec!["<..>", "nested"],
-            "input-folder mode should hide files and show directories"
-        );
-        assert_eq!(
-            picker.handle_key(key(KeyCode::Char('s'))),
-            PickerAction::Done(vec![root.path().to_owned()])
-        );
-
-        picker.cursor = 1;
-        assert_eq!(picker.handle_key(key(KeyCode::Enter)), PickerAction::None);
-        assert_eq!(picker.dir, root.path().join("nested"));
-        assert_eq!(
-            picker.handle_key(key(KeyCode::Char('s'))),
-            PickerAction::Done(vec![root.path().join("nested")])
         );
     }
 

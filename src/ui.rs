@@ -473,7 +473,7 @@ fn card_hover_target(app: &App, column: u16, row: u16, area: Rect) -> Option<Hov
 }
 
 fn picker_hover_target(picker: &Picker, column: u16, row: u16, area: Rect) -> Option<HoverTarget> {
-    let layout = picker_layout(picker, area);
+    let layout = picker_layout(area);
     if picker.error.is_none() && contains(layout.list, column, row) {
         let offset = usize::from(row.saturating_sub(layout.list.y));
         let index = picker
@@ -482,9 +482,6 @@ fn picker_hover_target(picker: &Picker, column: u16, row: u16, area: Rect) -> Op
         if index < picker.rows.len() {
             return Some(HoverTarget::PickerRow(index));
         }
-    }
-    if picker.mode == PickerMode::OutputFile && contains(layout.name, column, row) {
-        return Some(HoverTarget::PickerName);
     }
     picker_button_rects(picker, layout.buttons)
         .into_iter()
@@ -1421,7 +1418,6 @@ fn outcome_line<'a>(record: &JobRecord) -> Line<'a> {
 struct PickerLayout {
     card: Rect,
     path: Rect,
-    name: Rect,
     list: Rect,
     buttons: Rect,
 }
@@ -1433,7 +1429,7 @@ enum PickerButton {
     Primary,
 }
 
-fn picker_layout(picker: &Picker, area: Rect) -> PickerLayout {
+fn picker_layout(area: Rect) -> PickerLayout {
     let width = PICKER_WIDTH.min(area.width);
     let height = PICKER_HEIGHT.min(area.height.saturating_sub(1));
     let card = Rect::new(
@@ -1445,14 +1441,8 @@ fn picker_layout(picker: &Picker, area: Rect) -> PickerLayout {
     let inner = Block::bordered()
         .padding(Padding::horizontal(1))
         .inner(card);
-    let name_rows = if picker.mode == PickerMode::OutputFile {
-        2
-    } else {
-        0
-    };
-    let [path, name, list, buttons] = Layout::vertical([
+    let [path, list, buttons] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(name_rows),
         Constraint::Min(1),
         Constraint::Length(1),
     ])
@@ -1460,7 +1450,6 @@ fn picker_layout(picker: &Picker, area: Rect) -> PickerLayout {
     PickerLayout {
         card,
         path,
-        name,
         list,
         buttons,
     }
@@ -1469,12 +1458,10 @@ fn picker_layout(picker: &Picker, area: Rect) -> PickerLayout {
 /// The picker screen: the modal card on the floor, and the same status bar
 /// under it so its hints stay on the same line.
 fn render_picker(frame: &mut Frame<'_>, app: &App, picker: &Picker, area: Rect) {
-    let layout = picker_layout(picker, area);
+    let layout = picker_layout(area);
 
     let title = match picker.mode {
-        PickerMode::InputFolder => "INPUT FOLDER",
         PickerMode::InputFiles => "INPUT VIDEO FILES",
-        PickerMode::OutputFile => "SAVE OUTPUT",
         PickerMode::OutputFolder => "CHOOSE FOLDER",
     };
     let block = Block::bordered()
@@ -1495,10 +1482,6 @@ fn render_picker(frame: &mut Frame<'_>, app: &App, picker: &Picker, area: Rect) 
         ))),
         layout.path,
     );
-
-    if picker.mode == PickerMode::OutputFile {
-        render_picker_name(frame, app, picker, layout.name);
-    }
 
     if let Some(error) = picker.error.as_deref() {
         frame.render_widget(
@@ -1523,39 +1506,6 @@ fn render_picker(frame: &mut Frame<'_>, app: &App, picker: &Picker, area: Rect) 
             Style::default().fg(MUTED).bg(SURFACE),
         ))),
         status,
-    );
-}
-
-/// The file name field of the save card: a label line and an editable line that
-/// takes the selection fill while it is focused, like a beaver path field.
-fn render_picker_name(frame: &mut Frame<'_>, app: &App, picker: &Picker, area: Rect) {
-    let [heading, field] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "  Name".to_owned(),
-            Style::default().fg(MUTED),
-        ))),
-        heading,
-    );
-    let fill = if app.hover == Some(HoverTarget::PickerName) {
-        theme::HOVER
-    } else if picker.editing_name {
-        SELECTION
-    } else {
-        PANEL
-    };
-    let value = format!(
-        "  {}{}",
-        capped(&picker.filename, (field.width as usize).saturating_sub(3)),
-        if picker.editing_name { "_" } else { "" }
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            value,
-            Style::default().fg(TEXT).bg(fill),
-        ))),
-        field,
     );
 }
 
@@ -1771,16 +1721,9 @@ fn draw_picker_button(
 }
 
 fn handle_picker_mouse(app: &mut App, event: MouseEvent, area: Rect) -> UiCommand {
-    let picker = app.picker.as_ref().expect("a picker is open");
-    let layout = picker_layout(picker, area);
+    let layout = picker_layout(area);
 
     if event.kind == MouseEventKind::Down(MouseButton::Left) {
-        if contains(layout.name, event.column, event.row) && picker.mode == PickerMode::OutputFile {
-            if let Some(picker) = app.picker.as_mut() {
-                picker.focus_name();
-            }
-            return UiCommand::None;
-        }
         if contains(layout.buttons, event.column, event.row) {
             return handle_picker_button_click(app, event, &layout);
         }
@@ -2404,11 +2347,10 @@ mod tests {
         app.picker = Some(Picker::open(
             PickerMode::InputFiles,
             root.path().to_owned(),
-            None,
             false,
         ));
         let area = Rect::new(0, 0, 100, 30);
-        let list = picker_layout(app.picker.as_ref().unwrap(), area).list;
+        let list = picker_layout(area).list;
         let cursor = app.picker.as_ref().unwrap().cursor;
         let selected = app.picker.as_ref().unwrap().selected.clone();
 
@@ -2429,7 +2371,7 @@ mod tests {
             theme::HOVER
         );
 
-        let buttons = picker_layout(app.picker.as_ref().unwrap(), area).buttons;
+        let buttons = picker_layout(area).buttons;
         handle_mouse(
             &mut app,
             mouse(MouseEventKind::Moved, buttons.x + 2, buttons.y),
@@ -2971,7 +2913,6 @@ mod tests {
         app.picker = Some(Picker::open(
             PickerMode::InputFiles,
             root.path().to_owned(),
-            None,
             false,
         ));
 
@@ -2995,13 +2936,12 @@ mod tests {
         app.picker = Some(Picker::open(
             PickerMode::InputFiles,
             root.path().to_owned(),
-            None,
             false,
         ));
 
         let area = Rect::new(0, 0, 100, 30);
         let picker = app.picker.as_ref().expect("the picker should be open");
-        let layout = picker_layout(picker, area);
+        let layout = picker_layout(area);
         let file_index = picker
             .rows
             .iter()
@@ -3027,23 +2967,6 @@ mod tests {
     }
 
     #[test]
-    fn save_picker_shows_the_name_field() {
-        let root = tempfile::tempdir().expect("a temp directory should be created");
-        let mut app = test_app();
-        app.picker = Some(Picker::open(
-            PickerMode::OutputFile,
-            root.path().to_owned(),
-            Some("clip.mkv".to_owned()),
-            false,
-        ));
-        let rendered = render_text(&app, 100, 30);
-        assert!(rendered.contains("SAVE OUTPUT"), "{rendered}");
-        assert!(rendered.contains("Name"), "{rendered}");
-        assert!(rendered.contains("clip.mkv"), "{rendered}");
-        assert!(rendered.contains("Save here (s)"), "{rendered}");
-    }
-
-    #[test]
     fn double_click_on_a_file_closes_the_picker_and_selects_it() {
         let root = tempfile::tempdir().expect("a temp directory should be created");
         fs::write(root.path().join("a.mp4"), b"").unwrap();
@@ -3051,11 +2974,10 @@ mod tests {
         app.picker = Some(Picker::open(
             PickerMode::InputFiles,
             root.path().to_owned(),
-            None,
             false,
         ));
         let area = Rect::new(0, 0, 100, 30);
-        let list = picker_layout(app.picker.as_ref().unwrap(), area).list;
+        let list = picker_layout(area).list;
         let row = list.y + 1; // a.mp4, right after the parent row
 
         handle_mouse(
@@ -3072,32 +2994,5 @@ mod tests {
         );
         assert!(app.picker.is_none(), "the second click should confirm");
         assert_eq!(app.draft.inputs, vec![root.path().join("a.mp4")]);
-    }
-
-    #[test]
-    fn the_primary_button_does_not_fire_with_an_empty_name() {
-        let root = tempfile::tempdir().expect("a temp directory should be created");
-        let mut app = test_app();
-        app.picker = Some(Picker::open(
-            PickerMode::OutputFile,
-            root.path().to_owned(),
-            None, // no default name
-            false,
-        ));
-        let area = Rect::new(0, 0, 100, 30);
-        let buttons = picker_layout(app.picker.as_ref().unwrap(), area).buttons;
-        let primary = buttons.right().saturating_sub(13);
-
-        handle_mouse(
-            &mut app,
-            mouse(
-                MouseEventKind::Down(MouseButton::Left),
-                primary + 1,
-                buttons.y,
-            ),
-            area,
-        );
-        assert!(app.picker.is_some(), "an empty name must not confirm");
-        assert!(render_text(&app, 100, 30).contains("Enter a file name first"));
     }
 }

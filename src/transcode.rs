@@ -26,7 +26,6 @@ use crate::domain::{
 pub struct CommandSpec {
     pub program: PathBuf,
     pub args: Vec<OsString>,
-    pub temporary_output: PathBuf,
 }
 
 #[derive(Debug)]
@@ -134,7 +133,6 @@ pub fn build_command_spec(
     CommandSpec {
         program: ffmpeg.to_owned(),
         args,
-        temporary_output: artifact.temporary_path().to_owned(),
     }
 }
 
@@ -629,8 +627,13 @@ mod tests {
                 .map(|value| value.to_string_lossy())
                 .collect::<Vec<_>>();
 
+            let output_arg = spec
+                .args
+                .last()
+                .expect("the output must be the final argument");
+            assert_eq!(Path::new(output_arg), artifact.temporary_path());
             assert_eq!(
-                spec.temporary_output.extension().and_then(OsStr::to_str),
+                Path::new(output_arg).extension().and_then(OsStr::to_str),
                 Some(extension)
             );
             assert!(args.windows(2).any(|pair| pair == ["-f", muxer]));
